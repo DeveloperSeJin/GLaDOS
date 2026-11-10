@@ -1,0 +1,64 @@
+# GLaDOS 기본 정책 (GLaDOS 안에 들어 있는 기본 층)
+# - 도구별로 "패턴: 판정". 판정은 allow(허용) / ask(승인) / deny(차단) / wait(대기)
+# - 기본 → 연구원님(~/.glados/policy.yaml) → 서버 → 저장소 순서로 겹치고, 마지막에 맞는 규칙이 이긴다
+# - 아무것도 맞지 않으면 차단
+# - "@protected"는 보호 위치(키·비밀번호, 시스템 폴더, 셸 설정)에 맞는다
+# - 코드에 박힌 규칙(안전장치 차단, 관리자 권한 승인, 음성, 실험 단계, 공유 서버 sudo)은 이 파일로 풀 수 없다
+
+fs.search:
+  "*": allow
+  "@protected": ask
+
+fs.read:
+  "*": allow
+  "@protected": ask
+
+fs.write_new:            # 새 파일만. 같은 이름이 있으면 이름을 바꿔 저장
+  "*": allow
+  "@protected": ask
+
+fs.edit:                 # 원본 수정은 승인 + 체크포인트
+  "*": ask
+
+fs.trash:                # 삭제는 휴지통으로만
+  "*": ask
+
+shell.run:
+  "*": ask
+  "git status*": allow
+  "git log*": allow
+  "git diff*": allow
+  "rg *": allow
+  "nvidia-smi*": allow
+  "ollama list*": allow
+  "ollama ps*": allow
+
+web.search:              # 외부 전송으로 세고 표시 (개인 정보·파일 내용 검사는 M3)
+  "*": allow
+
+web.fetch:
+  "*": allow
+
+remote.gpu:
+  "*": allow
+
+remote.log:
+  "*": allow
+
+remote.exec:
+  "*": deny
+  "nvidia-smi*": allow
+  "df *": allow
+  "du *": allow
+  "tail *": allow
+  "ls *": allow
+  "cat *": allow
+
+git.snapshot:
+  "*": allow
+
+ask.user:
+  "*": allow
+
+mcp:                     # 등록하지 않은 외부 MCP 서버
+  "*": deny

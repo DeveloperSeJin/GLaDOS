@@ -1,0 +1,27 @@
+[project]
+name = "glados"
+version = "0.1.0"
+description = "GLaDOS (Grounded Logic and Desktop Orchestration System) - 내 컴퓨터에서 로컬 모델로 도는 개인 하네스"
+readme = "README.md"
+authors = [
+    { name = "sejin", email = "sejinp98@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+glados = "glados:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

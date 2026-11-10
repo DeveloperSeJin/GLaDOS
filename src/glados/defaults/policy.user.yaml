@@ -1,0 +1,11 @@
+# 연구원님 정책 - GLaDOS 기본 정책 뒤에 붙는다. 마지막에 맞는 규칙이 이긴다.
+# GLaDOS는 이 파일을 고칠 수 없다 (안전장치). 편집기로 직접 여세요.
+# 기본 정책은 GLaDOS 소스의 glados/defaults/policy.yaml에 있다.
+#
+# 예: make 명령은 묻지 않고 허용
+# shell.run:
+#   "make *": allow
+#
+# 예: 보호 위치 읽기도 묻지 않기 (권하지 않음)
+# fs.read:
+#   "@protected": allow

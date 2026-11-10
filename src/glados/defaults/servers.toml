@@ -1,0 +1,8 @@
+# 공유 GPU 서버 (M4부터 사용)
+# alias는 ~/.ssh/config의 Host 이름과 같게 적는다. 연결 정보와 키는 ~/.ssh/config와 ssh-agent에서 가져온다.
+
+[[server]]
+alias = ""                              # 예: "server-a"
+gpus = 4
+workdir = "/home/saul_park/workspace"   # 내 작업 폴더
+tmux_prefix = "glados-saul_park"        # 실행 세션 이름: <tmux_prefix>-<실험ID>
