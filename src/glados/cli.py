@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import sys
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -24,7 +25,9 @@ import glados
 from glados import __version__, i18n, osinfo
 from glados.config import Config, ConfigError, ensure_home, glados_home, load_config, peek_language
 from glados.core import events as ev
-from glados.core.context import BRIEF, CLIPPED, DROPPED, FULL, MESSAGE_OVERHEAD, TASK_RESERVE, Conversation, limit_chars
+from glados.core.context import (
+    BRIEF, CLIPPED, DROPPED, FULL, MESSAGE_OVERHEAD, TASK_RESERVE, Conversation, Turn, limit_chars,
+)
 from glados.core.events import Event
 from glados.core.guards import DEFAULT_GUARDS, needs_evidence
 from glados.core.llm import Cancelled, LLMError, OllamaClient, OllamaUnavailable
@@ -36,17 +39,23 @@ from glados.hands import shell
 from glados.hands.web import Egress, search_status
 from glados.i18n import localized, t
 from glados.memory.log import PolicyLog, TaskLog, summarize_args
+from glados.memory.notes import Notes, budget as notes_budget
+from glados.memory.sessions import SessionInfo, SessionStore
+from glados.safety.privacy import secret_in_note
 from glados.safety.checkpoint import Checkpoints
 from glados.safety.locations import Places, classify, normalize
 from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 
-LATER = {"/resume": "M6"}
+LATER: dict[str, str] = {}   # 다음 단계에서 만들 명령 (/명령: 단계)
 LEVELS = (FULL, CLIPPED, BRIEF, DROPPED)
 STOPS = {"format", "same_call", "tool_errors", "max_steps", "user", "denied"}   # 엔진이 키로 알려 주는 멈춤 이유
 SOURCES_SHOWN = 3        # 화면에 보여 줄 출처 수
 SHELL_LINES_SHOWN = 12   # GLaDOS가 실행한 명령의 출력을 화면에 몇 줄까지
 DIRECT_LINES_SHOWN = 200  # !명령 출력을 화면에 몇 줄까지
 DIRECT_TIMEOUT_S = 600   # !명령 시간 제한 (Ctrl+C로 언제든 멈춤)
+RESUME_LIST = 10         # /resume 목록에 보일 지난 대화 수
+EARLIER_SHOWN = 3        # 기억이 비었을 때 모델에게 알려 줄 지난 대화 수
+EARLIER_TITLE = 60       # 그 제목(첫 요청)의 최대 길이
 CD = re.compile(r"^(?:cd|chdir|Set-Location|sl)(?:\s+(.*))?$", re.IGNORECASE)
 
 
@@ -79,6 +88,8 @@ class Screen:
 
     def styled(self, style: str, text: str) -> str:
         """event_lines()의 모양 이름 -> 이 화면의 글."""
+        if style == "speaker":
+            return self.cobalt("●") + " " + self.dim(text)
         if style == "fact":
             return self.bold(text)
         if style in ("wit", "dim"):
@@ -112,12 +123,13 @@ def _brief(args: dict, limit: int = 100) -> str:
 def event_lines(e: Event) -> list[tuple[str, str]]:
     """엔진 이벤트 하나 -> 화면 줄 [(모양, 글)]. 줄 화면과 TUI가 같이 쓴다.
 
-    모양: fact(굵게, 사실) · wit(흐리게, 위트) · dim(흐리게, 과정) · plain."""
+    모양: speaker(GLaDOS의 코발트 점 + 이름) · fact(굵게, 사실) · wit(흐리게, 위트) · dim(흐리게, 과정) · plain."""
     d = e.data
     out: list[tuple[str, str]] = []
     if e.kind == ev.START:
         out.append(("dim", t("render.working")))
     elif e.kind == ev.ANSWER:
+        out.append(("speaker", t("speaker.glados")))             # 누가 말하는지 (M6.3: 연구원님 말과 구별)
         out.append(("fact", d["fact"]))
         if d.get("wit"):
             out.append(("wit", d["wit"]))
@@ -169,6 +181,19 @@ def source_dirs() -> tuple[str, ...]:
     return tuple(dirs)
 
 
+def dev_run() -> bool:
+    """저장소의 .venv로 돌고 있나 (`uv run glados`). 설치한 `glados` 명령(uv tool)은 자기 환경에서 돈다 (M6.2)."""
+    try:
+        prefix = Path(sys.prefix).resolve()
+    except OSError:
+        return False
+    for src in source_dirs()[1:]:                     # [1:]: 저장소 폴더 (개발 중일 때만 있음)
+        root = Path(src)
+        if prefix == root or root in prefix.parents:
+            return True
+    return False
+
+
 class App:
     def __init__(self, cfg: Config, screen: Screen, llm=None, os_name: str | None = None):
         self.cfg = cfg
@@ -192,12 +217,16 @@ class App:
             llm=self.llm, model_name=cfg.model.name,                             # fs.inspect가 파일마다 묻는 모델
             web=cfg.web, egress=Egress(cfg.home / "logs" / "egress.jsonl"),     # 웹 손 (M3): 외부 전송 기록
             servers=list(cfg.servers),                                          # 원격 손 (M4): servers.toml
+            sessions=SessionStore(cfg.home),                                    # 대화 세션 (M6): 이어하기
+            notes=Notes(cfg.home, cfg.language),                                # MEMORY.md (M6): "기억해"
         )
         self.translator = Translator(self.llm, keep=[s.alias for s in cfg.servers])   # 영어 답 -> 연구원님의 언어 (서버 이름은 그대로)
         self.tools = load_hands(self.os, self.hctx)
         self.task_log = TaskLog(cfg.home)
         self.policy_log = PolicyLog(cfg.home)
         self.memory = Conversation()                      # 이 세션의 대화 (지난 작업을 통째로 기억)
+        self.sessions: SessionStore = self.hctx.sessions  # 작업마다 저장 (M6). 지금 세션 번호는 hctx.session_id
+        self.notes: Notes = self.hctx.notes
         self.context_chars = limit_chars(cfg.model.num_ctx)
         self.runner = self.hctx.runner                    # 서버 실행 (M5). 서버가 없으면 None
         if self.runner is not None:
@@ -217,7 +246,24 @@ class App:
             servers=[f"{s.alias} ({s.gpus or '?'} GPUs, work folder {s.workdir or '~'}, projects in "
                      f"{(s.workdir or '~').rstrip('/')}/{s.projects})" for s in self.cfg.servers],
             runs=self.runner.summary_line() if self.runner is not None else "",
+            notes=self.notes.prompt(notes_budget(self.cfg.model.num_ctx)),
+            earlier=self.earlier_sessions_line(),
         )
+
+    def earlier_sessions_line(self) -> str:
+        """기억이 비었을 때만: 최근 지난 대화 몇 개 (영어, 모델용). "아까 PDF 찾던 거 이어서"에 모델이 맞는 것을 골라
+        session.resume을 부르게 (가장 최근 하나만 보여 주면 그게 엉뚱한 대화일 때 단서가 없다, M6.1)."""
+        if self.memory.turns:
+            return ""
+        recent = self.sessions.recent(EARLIER_SHOWN, exclude=self.hctx.session_id)
+        if not recent:
+            return ""
+        items = []
+        for info in recent:
+            when = datetime.fromtimestamp(info.last).strftime("%Y-%m-%d %H:%M")
+            title = info.title if len(info.title) <= EARLIER_TITLE else info.title[:EARLIER_TITLE - 1] + "…"
+            items.append(f'{when} "{title}" ({info.count} task{"" if info.count == 1 else "s"})')
+        return "Earlier conversations (newest first): " + "; ".join(items) + "."
 
     def set_cwd(self, path: str) -> None:
         self.places = replace(self.places, cwd=path)
@@ -243,11 +289,13 @@ class App:
                 return cand
         return self.places.home
 
-    def leave_safety_cwd(self) -> str:
-        """GLaDOS를 자기 폴더(소스·GLADOS_HOME)에서 열었으면 작업 폴더를 작업 공간으로 옮긴다
-        (uv run glados는 늘 소스 폴더에서 열리는데, 거기서는 파일을 만들거나 명령을 돌릴 수 없다).
+    def leave_safety_cwd(self, dev: bool | None = None) -> str:
+        """`uv run glados`(개발용)를 자기 폴더(소스·GLADOS_HOME)에서 열었으면 작업 폴더를 작업 공간으로 옮긴다
+        (uv run은 늘 소스 폴더에서 열리는데, 거기서는 파일을 만들거나 명령을 돌릴 수 없다).
+        설치한 `glados` 명령은 연 폴더를 그대로 쓴다 (M6.2 연구원님 결정: 어디서 열지 연구원님이 고른 것).
+        자기 폴더면 시작 화면이 "GLaDOS가 부르는 명령은 읽기만" 안내를 보여 준다.
         옮긴 곳을 돌려준다 (안 옮겼으면 ""). 화면을 열 때 한 번 부른다 (시험에서 만드는 App은 부르지 않음)."""
-        if not self.cwd_is_safety():
+        if not (dev_run() if dev is None else dev) or not self.cwd_is_safety():
             return ""
         target = self.workspace()
         try:
@@ -338,9 +386,93 @@ class App:
             return None
         finally:
             self.hctx.emit = None
+            self.apply_resume()                          # session.resume을 불렀으면 그 대화를 기억에 (이번 턴은 그 뒤에)
         self.task_log.finish(task_id, result.status)
-        self.memory.add(request, result)
+        self.remember(self.memory.add(request, result))
         return result
+
+    # ------------------------------------------------------------------ 대화 세션 (M6)
+    def remember(self, turn: Turn) -> None:
+        """끝난 턴을 지금 세션에 저장한다 (첫 턴에서 세션을 만든다). 저장이 안 돼도 대화는 계속한다."""
+        try:
+            if not self.hctx.session_id:
+                self.hctx.session_id = self.sessions.new(turn.request)
+            self.sessions.append(self.hctx.session_id, turn)
+        except sqlite3.Error:
+            pass
+
+    def forget(self) -> None:
+        """/new: 기억을 비우고 새 세션 (앞의 세션은 저장돼 있다)."""
+        self.memory.clear()
+        self.hctx.session_id = ""
+        self.hctx.resume_to = ""
+
+    def load_session(self, sid: str) -> SessionInfo | None:
+        """지난 세션을 기억에 넣고 그 세션에 이어서 저장한다."""
+        info = self.sessions.get(sid)
+        if info is None:
+            return None
+        turns = self.sessions.turns(sid)
+        self.memory.clear()
+        self.memory.turns.extend(turns)
+        self.hctx.session_id = sid
+        return info
+
+    def apply_resume(self) -> None:
+        sid, self.hctx.resume_to = self.hctx.resume_to, ""
+        if not sid or sid == self.hctx.session_id:
+            return
+        info = self.load_session(sid)
+        if info is not None:
+            self.screen.say(self.screen.dim(t("resume.auto", when=info.when(), title=info.title, count=info.count)))
+
+    def resume_lines(self, args: list[str]) -> tuple[list[tuple[str, str]], bool]:
+        """/resume: 목록, /resume N: 불러오기. ([(모양, 글)], 불러왔는지)."""
+        recent = self.sessions.recent(RESUME_LIST, exclude=self.hctx.session_id)
+        if not recent:
+            return [("plain", t("resume.empty"))], False
+        if not args:
+            rows = [("plain", t("resume.title"))]
+            rows += [("plain", t("resume.row", n=i, when=x.when(), title=x.title, count=x.count))
+                     for i, x in enumerate(recent, 1)]
+            return rows, False
+        arg = args[0]
+        if not arg.isdigit() or not 1 <= int(arg) <= len(recent):
+            return [("plain", t("resume.bad", arg=arg, max=len(recent)))], False
+        info = self.load_session(recent[int(arg) - 1].id)
+        if info is None:
+            return [("plain", t("resume.empty"))], False
+        return self.resumed_rows(info), True
+
+    def resumed_rows(self, info: SessionInfo) -> list[tuple[str, str]]:
+        rows = [("fact", t("resume.done", when=info.when(), title=info.title, count=info.count))]
+        if self.memory.turns:
+            last = " ".join(self.memory.turns[-1].request.split())
+            rows.append(("dim", t("resume.last", request=last if len(last) <= 100 else last[:99] + "…")))
+        return rows
+
+    def memory_lines(self, args: list[str]) -> list[tuple[str, str]]:
+        """/memory: 기억한 것 (MEMORY.md), /memory del N: 지우기."""
+        items = self.notes.items()
+        path = str(self.notes.path)
+        if args and args[0].lower() in ("del", "rm", "delete", "remove", "지워", "삭제"):
+            arg = args[1] if len(args) > 1 else ""
+            if not arg.isdigit() or not 1 <= int(arg) <= len(items):
+                return [("plain", t("memory.bad", max=max(len(items), 1)))]
+            removed = self.notes.remove(int(arg))
+            return [("plain", t("memory.removed", item=removed or ""))]
+        if not items:
+            return [("plain", t("memory.empty", path=path))]
+        rows = [("plain", t("memory.title", path=path))]
+        rows += [("plain", t("memory.row_secret" if secret_in_note(item) else "memory.row", n=i, item=item))
+                 for i, item in enumerate(items, 1)]
+        rows.append(("dim", t("memory.hint")))
+        return rows
+
+    def resume_hint(self) -> SessionInfo | None:
+        """처음 화면에서 권할 지난 대화 (가장 최근 것)."""
+        last = self.sessions.recent(1, exclude=self.hctx.session_id)
+        return last[0] if last else None
 
     def _abort(self, task_id: str, reason: str, logged: str, shown: str) -> None:
         """기록은 영어(엔진 안쪽), 화면은 지금 언어."""
@@ -364,6 +496,8 @@ class App:
             s.say(f"  {call.tool} {summarize_args(call.args, 120)}")
         if d.key == "policy.remote_run":
             s.say(t("approve.options_run"))
+        elif d.key == "policy.memory_note":
+            s.say(t("approve.options_note"))
         else:
             s.say(t("approve.options_task") if d.grantable else t("approve.options"))
         while True:
@@ -391,8 +525,14 @@ class App:
         if cmd == "/help":
             s.say(t("help"))
         elif cmd == "/new":
-            self.memory.clear()
+            self.forget()
             s.say(t("new.done"))
+        elif cmd == "/resume":
+            for style, line in self.resume_lines(words[1:])[0]:
+                s.say(s.styled(style, line))
+        elif cmd == "/memory":
+            for style, line in self.memory_lines(words[1:]):
+                s.say(s.styled(style, line))
         elif cmd in ("/context", "/ctx"):
             for line in self.context_lines():
                 s.say(line)
@@ -594,7 +734,7 @@ class App:
         observation = clip_output(text, self.cfg.home / "logs" / "outputs", task_id)
         self.task_log.event(task_id, Event(ev.OBSERVATION, {"tool": "shell.run", "text": observation[:500]}))
         self.task_log.finish(task_id, "done")
-        self.memory.add_direct(command, observation)
+        self.remember(self.memory.add_direct(command, observation))
         return Direct(command, cwd, res)
 
     def show_direct(self, d: "Direct") -> None:
@@ -642,6 +782,9 @@ class App:
         s.say(s.dim(self.header()))
         s.say(s.dim(self.web_note()))
         s.say(t("greet.first", home=self.cfg.home) if first_run else t("greet.again"))
+        last = self.resume_hint()
+        if last is not None:
+            s.say(s.dim(t("resume.hint", when=last.when(), title=last.title, count=last.count)))
         if self.cwd_is_safety():
             s.say(s.dim(t("cwd.safety_note")))
         self.watch()
@@ -670,6 +813,7 @@ class App:
 
     def close(self) -> None:
         self.task_log.close()
+        self.sessions.close()
         if self.runner is not None:
             self.runner.stop_watch()                      # 서버의 실행은 그대로 돈다 (tmux)
             self.runner.on_notice = None

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from glados.core.textfix import clean, clean_any
 from glados.i18n import KeyedError, t
 from glados.safety.checkpoint import Checkpoints
 from glados.safety.locations import Places
@@ -34,7 +35,8 @@ class ToolError(KeyedError):
 
 
 def tool_error(key: str, **params: Any) -> ToolError:
-    """i18n 키로 만드는 도구 오류: 글은 영어(모델용), 키와 값은 화면용."""
+    """i18n 키로 만드는 도구 오류: 글은 영어(모델용), 키와 값은 화면용. 값의 깨진 글자는 고친다 (M6.2)."""
+    params = {k: clean_any(v) for k, v in params.items()}
     return ToolError(t(key, "en", **params), key, **params)
 
 
@@ -80,6 +82,11 @@ class HandContext:
     hub: Any = None                              # hands.remote.Hub: 서버 연결들 (앱이 끝날 때 닫는다)
     gpu_watch: Any = None                        # safety.fair.GpuWatch: 서버 GPU를 본 기록 (이 세션)
     runner: Any = None                           # hands.runner.Runner: 서버 실행·대기 줄·배경 감시 (M5)
+    # 대화 세션 (M6): 저장소, 지금 세션, 작업 중 session.resume이 고른 세션 (작업이 끝나면 앱이 불러온다)
+    sessions: Any = None                         # memory.sessions.SessionStore. 없으면 session.resume 없음
+    session_id: str = ""
+    resume_to: str = ""
+    notes: Any = None                            # memory.notes.Notes (MEMORY.md). 없으면 memory.note 없음
 
 
 class ToolRegistry:
@@ -114,7 +121,8 @@ class ToolRegistry:
         tool = self._tools.get(call.tool)
         if tool is None:
             raise tool_error("tool.unavailable", tool=call.tool)
-        return str(self._threaded(call.tool, tool.run, dict(call.args), timeout_s or tool.timeout_s, cancelled))
+        out = str(self._threaded(call.tool, tool.run, dict(call.args), timeout_s or tool.timeout_s, cancelled))
+        return clean(out)                # 깨진 글자(Windows 파일 이름 등)가 기록·기억·모델로 가지 않게 (M6.2)
 
     def preview(self, call: ToolCall, timeout_s: int | None = None,
                 cancelled: Callable[[], bool] | None = None) -> list[tuple[str, str]]:

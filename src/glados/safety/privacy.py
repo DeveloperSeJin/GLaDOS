@@ -221,6 +221,30 @@ def _dedupe(found: list[Finding]) -> list[Finding]:
     return out
 
 
+# ---------------------------------------------------------------------- 기억(MEMORY.md)에 넣으면 안 되는 비밀 (M6.2)
+# 비밀을 뜻하는 말 + 값. "비밀번호 관리자 써"처럼 값이 없으면 걸지 않는다. token·secret·API key는 ML 글에도 흔해서
+# ("token budget 4096") 값을 붙여 쓴 꼴("token: abc123", "API key는 ...")일 때만
+CREDENTIAL = re.compile(r"(?i)(?:password|passwd|passcode|pass\s*phrase|\bpin\b|pin\s*(?:code|number)|\bcvc\b|\bcvv\b|\botp\b"
+                        r"|비밀\s*번호|비번|암호(?!화|학)|패스\s*워드|핀\s*번호|보안\s*코드|인증\s*번호)")
+CRED_VALUE = re.compile(r"(?i)(?:password|passwd|passcode|\bpin|비밀\s*번호|비번|암호(?!화|학)|패스\s*워드|핀\s*번호|보안\s*코드"
+                        r"|token|secret|api[\s_-]?key|access[\s_-]?key)\s*(?:은|는|이|가|:|=|is|was)\s*['\"]?\S{3,}")
+DIGITS = re.compile(r"(?<!\d)\d{4,}(?!\d)")
+MIXED = re.compile(r"(?<![A-Za-z0-9])(?=[A-Za-z0-9!@#$%^&*_.-]*[A-Za-z])(?=[A-Za-z0-9!@#$%^&*_.-]*\d)[A-Za-z0-9!@#$%^&*_.-]{6,}")
+
+
+def secret_in_note(text: str) -> Finding | None:
+    """기억할 글에 비밀이 들었나: 키·토큰 모양, "password=...", 주민등록번호, 카드 번호, 비밀을 뜻하는 말과 그 값
+    ("카드 비밀번호는 1234", "wifi password is hunter2"). 값은 보여 주지 않는다."""
+    if m := SECRET.search(text) or ASSIGN.search(text):
+        return Finding("secret", _mask(m.group(0)))
+    for f in _contacts(text):
+        if f.kind in ("rrn", "card"):
+            return f
+    if CRED_VALUE.search(text) or (CREDENTIAL.search(text) and (DIGITS.search(text) or MIXED.search(text))):
+        return Finding("secret", "")
+    return None
+
+
 def scan_text(text: str, *, names: tuple[str, ...] = (), home: str = "", local: str = "",
               user: str = "") -> list[Finding]:
     """검색어 같은 글. local: 이 컴퓨터의 도구가 돌려준 글, user: 연구원님이 쓴 글."""

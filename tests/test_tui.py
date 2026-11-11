@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
 import sys
@@ -144,7 +145,7 @@ def test_answer_shows_in_chat_and_panel(tmp_path):
     tools = ToolRegistry([Tool("fs.search", "find", run=lambda a: "1 found (scope: ~/Downloads)\n- /d/학위논문.pdf · 1KB")])
     llm = FakeLLM([act("fs.search", query="paper", kind="pdf"),
                    answer("Found one paper: 학위논문.pdf.", "Small sample.", ["/d/학위논문.pdf"]),
-                   translation("논문 1개를 찾았습니다: 학위논문.pdf.", "표본이 작습니다.")])
+                   translation("논문 1개를 찾았습니다: 학위논문.pdf.")])
     app = make(tmp_path, llm, tools)
 
     async def go():
@@ -157,6 +158,9 @@ def test_answer_shows_in_chat_and_panel(tmp_path):
             text = chat_text(app)
             assert "논문 1개를 찾았습니다: 학위논문.pdf." in text
             assert "출처: /d/학위논문.pdf" in text and "Found one paper" not in text
+            # 누가 말하는지 (M6.3): 제목은 "연구원님" 이름표, 답 앞에는 GLaDOS의 코발트 점과 이름, 위트는 영어
+            assert str(card.heading.render()) == "연구원님  다운로드에서 논문 찾아줘"
+            assert "● GLaDOS\n논문 1개를 찾았습니다: 학위논문.pdf.\nSmall sample." in card.body.plain()
             assert "... fs.search" not in text                         # 과정은 맥락에
             panel = activity_text(app)
             assert "-> fs.search query=paper kind=pdf" in panel and "<- 1 found" in panel
@@ -798,3 +802,59 @@ def test_notice_card_does_not_take_over_the_task(tmp_path):
             assert len(sent) == 2
     run(go())
     app.engine.close()
+
+
+# ---------------------------------------------------------------- 이어하기·기억 (M6)
+def test_resume_card_on_start_screen_and_resume_command(tmp_path):
+    """지난 대화가 있으면 처음 화면에 이어하기 카드. 누르면 그 대화를 불러오고, /new 뒤에는 방금 대화가 카드로."""
+    home = tmp_path / "glados_home"
+    ensure_home(home)
+    first = cli.App(load_config(home), cli.Screen(ansi=False, out=io.StringIO()), llm=FakeLLM([answer("Loss is 0.31.")]),
+                    os_name="linux")
+    first.ask_task("how is the cifar run")
+    first.close()
+    app = make(tmp_path, FakeLLM([answer("Epoch 7 was best.")]))
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            card = app.query_one("#suggest-resume")
+            await until(pilot, lambda: app.home.size_key != "")
+            await pilot.pause()
+            assert card.display and "how is the cifar run" in str(card.render()) and "작업 1개" in str(card.render())
+            await pilot.click("#suggest-resume")
+            await until(pilot, lambda: len(app.engine.memory.turns) == 1)
+            assert not app.home.display and "이어서 합니다: " in chat_text(app)
+            assert app.mem_stats[0] == 1
+            await send(pilot, "which epoch was best")
+            await until(pilot, lambda: not app.job)
+            assert len(app.engine.memory.turns) == 2
+            await pilot.click("#new-chat")
+            assert app.home.display and card.display and "how is the cifar run" in str(card.render())
+            await send(pilot, "/resume")
+            assert "1. " in chat_text(app) and "how is the cifar run (작업 2개)" in chat_text(app)
+            await send(pilot, "/resume 1")
+            await pilot.pause()
+            assert len(app.engine.memory.turns) == 2 and len(app.query(TaskCard)) == 1
+    run(go())
+    app.engine.close()
+
+
+def test_no_resume_card_without_earlier_conversation(tmp_path):
+    app = make(tmp_path, FakeLLM([]))
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            assert not app.query_one("#suggest-resume").display
+    run(go())
+    app.engine.close()
+
+
+def test_memory_note_in_approval_box():
+    """기억 (M6): 승인 상자에 저장할 글, 버튼은 기억하기·기억하지 않기."""
+    from glados.safety.policy import Decision, ToolCall
+    d = Decision("ask", "코드:기억", "이 내용을 기억할까요?", grantable=False, key="policy.memory_note")
+    card = [("fact", "실험 결과는 표로"), ("dim", "~/.glados/MEMORY.md에 한 줄로 남깁니다")]
+    box = tui.approval_dialog(ToolCall("memory.note", {"text": "실험 결과는 표로"}, card=card), d)
+    assert box.details.plain.startswith("실험 결과는 표로\n")
+    assert [(o[0], o[1]) for o in box.options] == [("once", "기억하기"), ("deny", "기억하지 않기")]

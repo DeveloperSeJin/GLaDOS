@@ -72,7 +72,7 @@ _RULE_EN = {
     "안전장치": "safety", "관리자표시": "admin_flag", "공유서버": "shared_server",
     "안전장치폴더": "safety_folder", "명령잇기": "chained", "보호위치명령": "protected_command",
     "개인정보": "private_data", "내부주소": "local_address", "환경변수": "env_vars", "남의파일": "others_files", "서버지우기": "server_delete",
-    "서버실행": "server_run", "실행멈춤": "run_stop",
+    "서버실행": "server_run", "실행멈춤": "run_stop", "기억": "memory", "비밀기억": "memory_secret",
 }
 
 
@@ -140,6 +140,8 @@ TEXT: dict[str, dict[str, str]] = {
     "render.sources": {"ko": "출처: {sources}", "en": "Sources: {sources}"},
     "render.sources_more": {"ko": "출처: {sources} 외 {count}개", "en": "Sources: {sources} (+{count} more)"},
     "render.blocked": {"ko": "[차단] {tool}: {reason}", "en": "[Blocked] {tool}: {reason}"},
+    "speaker.glados": {"ko": "GLaDOS", "en": "GLaDOS"},
+    "speaker.you": {"ko": "연구원님", "en": "You"},
     "render.egress_search": {"ko": "↗ 외부 전송 · {host} · 검색어 \"{what}\"", "en": "↗ sent outside · {host} · query \"{what}\""},
     "render.egress_fetch": {"ko": "↗ 외부 전송 · {host} · 페이지 읽기 {what}", "en": "↗ sent outside · {host} · fetch {what}"},
     "guard.sources": {"ko": "답의 출처 주소가 도구 결과에 없어 다시 확인하게 했습니다",
@@ -228,6 +230,16 @@ TEXT: dict[str, dict[str, str]] = {
     "tool.project_unknown": {"ko": "{server}에 {name} 프로젝트가 없습니다. 목록은 remote.projects로",
                              "en": "No project {name} on {server}. List them with remote.projects"},
     "tool.run_ended": {"ko": "{run}: 이미 끝난 실행입니다 ({state})", "en": "{run} has already ended ({state})"},
+    # 대화 잇기·기억 (M6)
+    "tool.resume_none": {"ko": "이어 갈 지난 대화가 없습니다",
+                         "en": "There is no earlier conversation to continue. Tell the Researcher."},
+    "tool.resume_nomatch": {"ko": "\"{query}\"에 맞는 지난 대화가 없습니다. 최근 대화: {sessions}",
+                            "en": "No earlier conversation matches \"{query}\". Recent ones: {sessions}. "
+                                  "Ask the Researcher which one, or call session.resume without query for the latest."},
+    "tool.note_empty": {"ko": "기억할 글이 비었습니다", "en": "text is empty. Put the note to save in text."},
+    "tool.note_secret": {"ko": "비밀번호·카드 번호·키 같은 비밀은 기억하지 않습니다",
+                         "en": "Secrets (passwords, PINs, card numbers, keys, tokens) are never saved. Do not save it "
+                               "anywhere else; suggest a password manager."},
     # 웹 손 (M3). 영어는 모델이 보는 글 (연구원님께 전할 것을 함께 적음)
     "tool.web_off": {"ko": "웹 검색이 아직 설정되지 않았습니다. glados.toml의 [web] search에 검색 서비스를 적어 주세요 (README의 M3 설정)",
                      "en": "Web search is not set up on this computer. Tell the Researcher to choose a search service "
@@ -289,6 +301,7 @@ TEXT: dict[str, dict[str, str]] = {
     "approve.title": {"ko": "[승인 필요]", "en": "[Approval needed]"},
     "approve.options": {"ko": "  1) 이번만   3) 거절", "en": "  1) Once   3) Deny"},
     "approve.options_run": {"ko": "  1) 맞습니다, 실행   3) 아니요", "en": "  1) Yes, run it   3) No"},
+    "approve.options_note": {"ko": "  1) 기억하기   3) 기억하지 않기", "en": "  1) Remember   3) Don't"},
     "approve.options_task": {"ko": "  1) 이번만   2) 이 작업 동안   3) 거절", "en": "  1) Once   2) For this task   3) Deny"},
     "choose.123": {"ko": "1, 2, 3 중에서 골라 주세요.", "en": "Choose 1, 2, or 3."},
     "choose.13": {"ko": "1 또는 3을 골라 주세요.", "en": "Choose 1 or 3."},
@@ -318,29 +331,58 @@ TEXT: dict[str, dict[str, str]] = {
 
     # 명령
     "help": {
-        "ko": "명령어\n  /help     이 도움말\n  /new      새 대화 (앞의 대화를 잊음)\n  /context  지금 기억하고 있는 대화\n"
+        "ko": "명령어\n  /help     이 도움말\n  /new      새 대화 (앞의 대화는 저장해 두고 /resume 으로 이어 감)\n  /context  지금 기억하고 있는 대화\n"
               "  /log      최근 정책 판정 10개\n  /sent     이 세션에서 밖으로 보낸 것 (웹 검색어, 읽은 주소)\n"
               "  /undo     마지막 파일 수정(fs.edit) 되돌리기\n"
               "  /lang     화면 언어 바꾸기 (/lang ko, /lang en. 이번 세션만)\n  /quit     끝내기\n"
               "  !명령     명령을 바로 실행 (예: !git status, !dir, !cd 폴더). 승인 없이 돌고 결과는 대화 기억에 남습니다\n"
               "  /servers  서버 목록과 연결·GPU 상태 (servers.toml)\n"
               "  /runs     서버 실행 목록 (EXP-NN, 상태, tmux 세션)\n"
-              "  /resume   다음 단계에서 만듭니다\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다 (서버의 실행은 계속 돕니다).\n"
+              "  /resume   지난 대화 목록, /resume 번호 로 이어 가기 (말로도 됩니다)\n"
+              "  /memory   기억한 것 (MEMORY.md), /memory del 번호 로 지우기\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다 (서버의 실행은 계속 돕니다).\n"
               "답은 물은 언어로 합니다 (한국어로 물으면 한국어, 영어로 물으면 영어).",
-        "en": "Commands\n  /help     this help\n  /new      new conversation (forget the earlier one)\n"
+        "en": "Commands\n  /help     this help\n  /new      new conversation (the earlier one is saved; /resume continues it)\n"
               "  /context  what is in memory now\n  /log      last 10 policy decisions\n"
               "  /sent     what was sent outside this session (web queries, fetched URLs)\n"
               "  /undo     undo the last file edit (fs.edit)\n  /lang     change the screen language (/lang ko, /lang en; this session only)\n"
               "  /quit     exit\n  !command  run a command directly (e.g. !git status, !dir, !cd folder); no approval, and the output stays in memory\n"
               "  /servers  servers with connection and GPU state (servers.toml)\n"
               "  /runs     your server runs (EXP-NN, state, tmux session)\n"
-              "  /resume   coming in a later stage\nCtrl+C during a task stops only that task (server runs keep going).\n"
+              "  /resume   earlier conversations; /resume <number> continues one (or just ask)\n"
+              "  /memory   what I remember (MEMORY.md); /memory del <number> deletes one\nCtrl+C during a task stops only that task (server runs keep going).\n"
               "Answers follow the language you ask in (Korean or English).",
     },
     "command.later": {"ko": "{cmd}는 {stage}에서 만듭니다.", "en": "{cmd} arrives in {stage}."},
     "command.unknown": {"ko": "모르는 명령입니다: {cmd}. /help를 보세요.", "en": "Unknown command: {cmd}. See /help."},
-    "new.done": {"ko": "새 대화를 시작합니다. 앞의 대화는 잊었습니다 (작업 기록 파일에는 남아 있습니다).",
-                 "en": "Starting a new conversation. I have forgotten the earlier one (the task log still has it)."},
+    # 지난 대화 (M6)
+    "resume.empty": {"ko": "이어 갈 지난 대화가 없습니다.", "en": "There is no earlier conversation to continue."},
+    "resume.title": {"ko": "지난 대화 (/resume 번호 로 이어 갑니다. 말로 \"어제 하던 거 이어서 하자\"도 됩니다)",
+                     "en": "Earlier conversations (continue with /resume <number>, or just say \"let's continue yesterday's work\")"},
+    "resume.row": {"ko": "  {n}. {when} · {title} (작업 {count}개)", "en": "  {n}. {when} · {title} ({count} tasks)"},
+    "resume.bad": {"ko": "/resume {arg}: 목록의 번호(1~{max})를 쓰세요. /resume 만 쓰면 목록을 봅니다.",
+                   "en": "/resume {arg}: use a number from the list (1-{max}). /resume alone shows the list."},
+    "resume.done": {"ko": "이어서 합니다: {when} · {title} (작업 {count}개). 하던 대화는 따로 저장돼 있습니다.",
+                    "en": "Continuing: {when} · {title} ({count} tasks). The conversation you were in is saved too."},
+    "resume.last": {"ko": "  마지막 작업: {request}", "en": "  Last task: {request}"},
+    "resume.hint": {"ko": "지난 대화: {when} · {title} (작업 {count}개). /resume 1 로 이어 갑니다.",
+                    "en": "Last conversation: {when} · {title} ({count} tasks). /resume 1 continues it."},
+    "resume.auto": {"ko": "지난 대화를 이어 갑니다: {when} · {title} (작업 {count}개)",
+                    "en": "Continuing the earlier conversation: {when} · {title} ({count} tasks)"},
+    # 기억 (MEMORY.md, M6)
+    "memory.empty": {"ko": "기억한 것이 없습니다. \"...기억해\"라고 하면 승인을 받고 {path}에 한 줄씩 남깁니다.",
+                     "en": "Nothing remembered yet. Say \"remember ...\" and, once you approve, it goes into {path}."},
+    "memory.title": {"ko": "기억한 것 ({path})", "en": "What I remember ({path})"},
+    "memory.row": {"ko": "  {n}. {item}", "en": "  {n}. {item}"},
+    "memory.row_secret": {"ko": "  {n}. {item}  (비밀로 보여 GLaDOS에게 넣지 않음 — /memory del {n} 으로 지우세요)",
+                          "en": "  {n}. {item}  (looks like a secret, not given to GLaDOS — delete it with /memory del {n})"},
+    "memory.hint": {"ko": "/memory del 번호 로 지웁니다. 파일을 직접 고쳐도 됩니다.",
+                    "en": "/memory del <number> deletes one. You can also edit the file."},
+    "memory.removed": {"ko": "지웠습니다: {item}", "en": "Deleted: {item}"},
+    "memory.bad": {"ko": "/memory del 번호: 목록의 번호(1~{max})를 쓰세요.", "en": "/memory del <number>: use a number from the list (1-{max})."},
+    "note.card_where": {"ko": "{path}에 한 줄로 남깁니다. /memory 로 보고 지울 수 있습니다",
+                        "en": "Saved as one line in {path}. /memory shows and deletes notes"},
+    "new.done": {"ko": "새 대화를 시작합니다. 앞의 대화는 저장해 두었습니다 (/resume 으로 이어 갈 수 있습니다).",
+                 "en": "Starting a new conversation. The earlier one is saved (/resume continues it)."},
     "lang.now": {"ko": "화면 언어: {name}. 이번 세션에만 적용됩니다. 계속 쓰려면 glados.toml의 [ui] language를 바꾸세요.",
                  "en": "Screen language: {name}. This session only; to keep it, set [ui] language in glados.toml."},
     "lang.usage": {"ko": "사용법: /lang ko 또는 /lang en (지금: {name})", "en": "Usage: /lang ko or /lang en (now: {name})"},
@@ -541,6 +583,10 @@ TEXT: dict[str, dict[str, str]] = {
     "policy.remote_outside": {"ko": "내 홈·작업 폴더 밖입니다 ({path})", "en": "Outside your home and work folders ({path})"},
     "policy.remote_run": {"ko": "이 명령어가 맞습니까? 맞으면 서버에서 실행합니다", "en": "Is this command right? If so, it runs on the server"},
     "policy.remote_stop": {"ko": "서버의 내 실행을 멈춥니다 (되돌릴 수 없음)", "en": "Stops your run on a server (cannot be undone)"},
+    "policy.memory_note": {"ko": "이 내용을 기억할까요? 다음 대화에서도 씁니다", "en": "Remember this? It is used in later conversations too"},
+    "policy.memory_secret": {"ko": "비밀번호·카드 번호·키 같은 비밀은 기억하지 않습니다 (MEMORY.md는 평문이고 매 작업 모델에 들어갑니다). 비밀번호 관리자를 쓰세요",
+                             "en": "Passwords, PINs, card numbers, keys and tokens are never saved to memory (MEMORY.md is "
+                                   "plain text and goes into every task)"},
     "policy.remote_background": {"ko": "서버에 오래 도는 작업을 띄우는 명령입니다. 학습은 remote.run으로 (GPU 확인·기록·알림)",
                                  "en": "Starts a background job on the server. Training goes through remote.run (GPU check, record, notices)"},
     "policy.safety_cwd": {"ko": "GLaDOS 안전장치 폴더({why}) 안에서는 허용 목록의 읽기 명령만 실행합니다",
@@ -649,6 +695,9 @@ TEXT: dict[str, dict[str, str]] = {
     "tui.suggest.cmd_wit": {"ko": "!는 바로 실행합니다. 결과는 기억합니다.",
                             "en": "A leading ! runs it now. I remember the output."},
     "tui.suggest.click": {"ko": "누르면 입력창에 넣습니다", "en": "Click to put it in the input"},
+    "tui.suggest.kind_resume": {"ko": "이어하기", "en": "CONTINUE"},
+    "tui.suggest.resume_wit": {"ko": "{when} · 작업 {count}개. 누르면 이어 갑니다.", "en": "{when} · {count} tasks. Click to continue."},
+    "tui.suggest.resume_click": {"ko": "누르면 이 대화를 이어 갑니다", "en": "Click to continue this conversation"},
     "tui.chips.label": {"ko": "종류는 GLaDOS가 판단합니다", "en": "GLaDOS decides the kind"},
     "tui.chips": {"ko": "파일 찾기|읽기·요약|새 파일|고치기|명령 실행|웹 검색",
                   "en": "Find|Read·summarize|New file|Edit|Commands|Web search"},
@@ -716,6 +765,8 @@ TEXT: dict[str, dict[str, str]] = {
     "tui.approve.keys13": {"ko": "1·3을 누르거나, Esc는 거절", "en": "Press 1 or 3. Esc denies"},
     "tui.approve.run_yes": {"ko": "맞습니다, 실행", "en": "Yes, run it"},
     "tui.approve.run_no": {"ko": "아니요", "en": "No"},
+    "tui.approve.note_yes": {"ko": "기억하기", "en": "Remember"},
+    "tui.approve.note_no": {"ko": "기억하지 않기", "en": "Don't"},
     "tui.approve.keys_run": {"ko": "1·3을 누르거나, Esc는 아니요 (고칠 것을 이어서 말하면 됩니다)",
                              "en": "Press 1 or 3. Esc means no (then say what to change)"},
     "tui.undo.kicker": {"ko": "되돌리기", "en": "UNDO"},

@@ -87,6 +87,8 @@ NUDGE_ACT = (
     "or, if no tool is needed, set done to true and answer."
 )
 DENY_LIMIT = 3             # 한 작업에서 정책에 막혀도 되는 횟수 (넘으면 멈추고 보고)
+HINT_SECRET = ("Do not save it anywhere else (no file, no command) and do not repeat it in your answer. "
+               "Tell the Researcher it was not saved and suggest a password manager.")
 HINT_SAFETY = (" GLaDOS's own folders (its program, settings, and logs) can never be changed, and commands there "
                "are read-only. Create files and run commands in another folder: {where}")
 HINT_REPEAT = "\n[note] Same result as before. Unless you change the conditions a lot, answer with what you have."
@@ -216,17 +218,18 @@ def run_task(
         return Answer(fact=done[0], wit=done[1]) if done else said
 
     def deliver(said: Answer, sources: list[str], english: Answer | None = None) -> Answer:
-        """모델의 답을 연구원님의 언어로 옮겨 화면에 낸다. 화면에 낸 답을 돌려준다."""
-        shown, translated, failed = said, False, False
-        text = f"{said.fact} {said.wit}"
+        """모델의 답을 연구원님의 언어로 옮겨 화면에 낸다. 화면에 낸 답을 돌려준다.
+        사실(fact)만 옮기고 위트(wit)는 영어 그대로 둔다 (M6.3 연구원님: "위트는 영어로")."""
+        wit = (english or said).wit                                   # 영어 위트 (모델이 다른 언어로 썼으면 옮긴 것)
+        shown, translated, failed = Answer(fact=said.fact, wit=wit), False, False
         if reply_lang == "en" and english is not None and english is not said:
             shown, translated = english, True                       # 영어로 물었는데 다른 언어로 답한 경우
-        elif translator is not None and not in_language(text, reply_lang):
-            done = translator.translate(said.fact, said.wit, reply_lang)
+        elif translator is not None and not in_language(said.fact, reply_lang):
+            done = translator.translate(said.fact, "", reply_lang)
             if done is None:
                 failed = True
             else:
-                shown, translated = Answer(fact=done[0], wit=done[1]), True
+                shown, translated = Answer(fact=done[0], wit=wit), True
         emit(Event(ev.ANSWER, {
             "fact": shown.fact, "wit": shown.wit, "sources": sources,
             "lang": reply_lang, "translated": translated, "untranslated": failed,
@@ -406,6 +409,8 @@ def _decide(call: ToolCall, d: Decision, ctx: PolicyContext, approve: ApproveFn)
         hint = ""
         if d.rule.startswith("코드:안전장치"):       # GLaDOS 자기 폴더: 어디서 하면 되는지 알려 준다
             hint = HINT_SAFETY.format(where=ctx.workspace or ctx.places.home)
+        if d.rule == "코드:비밀기억":                # 비밀은 다른 곳(파일·명령)에도 남기지 않게 (M6.2)
+            return False, "정책", f"Blocked: {reason}. {HINT_SECRET}"
         return False, "정책", f"Blocked: {reason}.{hint} Find another way, or report that it cannot be done."
     if d.verdict == "wait":
         return False, "정책", f"Waiting: {reason}"

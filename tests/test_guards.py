@@ -89,17 +89,18 @@ def test_answer_is_translated_and_memory_keeps_english():
     llm = FakeLLM([
         act("fs.search", query="paper"),
         answer("Found one paper: 학위논문.pdf.", "Small sample. Still a sample.", ["/d/학위논문.pdf"]),
-        translation("논문 1개를 찾았습니다: 학위논문.pdf.", "표본이 작습니다. 그래도 표본입니다."),
+        translation("논문 1개를 찾았습니다: 학위논문.pdf."),
     ])
     memory = Conversation()
     result, events = run(llm, "다운로드에서 논문 찾아줘", reply_lang="ko", memory=memory)
     assert result.answer.fact == "논문 1개를 찾았습니다: 학위논문.pdf."
+    assert result.answer.wit == "Small sample. Still a sample."                    # 위트는 영어 그대로 (M6.3)
     assert result.internal.fact == "Found one paper: 학위논문.pdf."
     shown = next(e for e in events if e.kind == ev.ANSWER)
     assert shown.data["translated"] and shown.data["original"]["fact"].startswith("Found one paper")
     system, user = llm.calls[2][0]                                                 # 번역 호출
     assert "Korean" in system["content"] and "합니다체" in system["content"]
-    assert json.loads(user["content"]) == {"fact": "Found one paper: 학위논문.pdf.", "wit": "Small sample. Still a sample."}
+    assert json.loads(user["content"]) == {"fact": "Found one paper: 학위논문.pdf.", "wit": ""}     # 사실만 옮긴다
     turn = memory.add("다운로드에서 논문 찾아줘", result)
     assert "Found one paper" in turn.answer and "논문 1개" not in turn.answer         # 기억에는 영어
 

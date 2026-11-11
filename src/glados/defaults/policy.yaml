@@ -149,6 +149,12 @@ remote.run:              # 서버에서 학습 실행 (tmux). 코드 규칙: 매
 remote.stop:             # 내 실행 멈추기 (Ctrl+C, 15초 뒤에도 돌면 세션 닫기). 코드 규칙: 매번 승인
   "*": ask
 
+session.resume:          # 지난 대화 불러오기 (이 컴퓨터의 sessions.db, 읽기만)
+  "*": allow
+
+memory.note:             # "기억해" -> MEMORY.md에 한 줄. 코드 규칙: 매번 승인 (저장할 글을 보여 줌)
+  "*": ask
+
 git.snapshot:
   "*": allow
 

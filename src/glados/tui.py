@@ -217,11 +217,17 @@ class TaskCard(Vertical):
         self.scope: list[str] = []
         self.egress: list[tuple[str, str, str]] = []   # 이 작업이 밖으로 보낸 것 (도구, 받은 곳, 보낸 것)
         self.kicker = Static(classes="kicker")
-        self.heading = Static(Text(title, style=f"bold {WHITE}"), classes="title")
+        self.heading = Static(self.heading_text(), classes="title")
         self.body = Lines(classes="body")
         self.live = Static(classes="live")          # 작업 중에 주고받는 토큰 (답이 나오면 지움)
         self.output = Lines(classes="output")
         self.nav: NavItem | None = None
+
+    def heading_text(self) -> Text:
+        """제목 = 연구원님이 쓴 것 (요청, !명령, /명령). 이름표를 붙여 GLaDOS의 답과 구별한다 (M6.3)."""
+        if self.kind in ("task", "command", "slash"):
+            return Text.assemble((t("speaker.you") + "  ", FAINT), (self.title_text, WHITE))
+        return Text(self.title_text, style=f"bold {WHITE}")
 
     def compose(self) -> ComposeResult:
         yield self.kicker
@@ -427,6 +433,7 @@ class HomeView(Vertical):
         self.greet = Static(id="home-greet")
         self.notes = Lines(id="home-notes")
         self.size_key = ""
+        self.resume: Any = None                          # 이어 갈 지난 대화 (SessionInfo, M6). 없으면 카드를 숨김
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="home-logo"):
@@ -436,6 +443,7 @@ class HomeView(Vertical):
                 yield self.fullname
                 yield self.tagline
         yield self.greet
+        yield Clickable(id="suggest-resume", classes="suggest")    # 이어하기 (M6): 지난 대화가 있을 때만, 한 줄 전체
         with Horizontal(id="suggestions"):
             yield Clickable(id="suggest-file", classes="suggest")
             yield Clickable(id="suggest-cmd", classes="suggest")
@@ -460,8 +468,29 @@ class HomeView(Vertical):
                                       (t(fact), f"bold {WHITE}"), "\n", (t(wit), MUTED)))
             card.tooltip = t("tui.suggest.click")
             card.action = self._filler(t(fact))
+        self.draw_resume()
         self.size_key = ""
         self.fit()
+
+    def set_resume(self, info: Any) -> None:
+        self.resume = info
+        if self.is_mounted:
+            self.draw_resume()
+            self.size_key = ""
+            self.fit()
+
+    def draw_resume(self) -> None:
+        """이어하기 카드 (M6): 가장 최근의 지난 대화. 누르면 그 대화를 불러온다."""
+        card = self.query_one("#suggest-resume", Clickable)
+        info = self.resume
+        card.display = info is not None
+        if info is None:
+            return
+        card.update(Text.assemble((t("tui.suggest.label", kind=t("tui.suggest.kind_resume")), FAINT), "\n",
+                                  (_clip(info.title, 60), f"bold {WHITE}"), "\n",
+                                  (t("tui.suggest.resume_wit", when=info.when(), count=info.count), MUTED)))
+        card.tooltip = t("tui.suggest.resume_click")
+        card.action = lambda: self.app.resume_session(info.id)
 
     def _filler(self, text: str) -> Callable[[], None]:
         return lambda: self.app.query_one(ChatInput).fill(text)
@@ -675,6 +704,11 @@ def approval_dialog(call: ToolCall, d: Decision) -> ChoiceDialog:
         hint = t("tui.approve.keys_run")
         return ChoiceDialog(t("tui.approve.kicker"), localized(d, fallback=d.reason), details, options, hint,
                             wide=bool(call.card))
+    if d.key == "policy.memory_note":              # "기억해" (M6): 저장할 글을 보고 정한다
+        options = [("once", t("tui.approve.note_yes"), "decide", ("1",)),
+                   ("deny", t("tui.approve.note_no"), "plain", ("3",))]
+        return ChoiceDialog(t("tui.approve.kicker"), localized(d, fallback=d.reason), details, options,
+                            t("tui.approve.keys13"))
     options = [("once", t("tui.approve.once"), "decide", ("1",))]
     if d.grantable:
         options.append(("task", t("tui.approve.task"), "plain", ("2",)))
@@ -724,6 +758,7 @@ class GladosTUI(TextualApp):
     #suggestions.stack {{ layout: vertical; }}
     .suggest {{ width: 1fr; height: auto; border: round {RULE}; padding: 0 1; margin-right: 1; }}
     #suggestions.stack .suggest {{ margin-right: 0; }}
+    #suggest-resume {{ width: 100%; margin: 1 0 0 0; }}
     .suggest:hover {{ border: round {LINE}; background: {SURFACE}; }}
     .card {{ height: auto; margin-bottom: 1; padding-bottom: 1; border-bottom: solid {RULE}; }}
     .card .kicker {{ height: 1; }}
@@ -865,6 +900,7 @@ class GladosTUI(TextualApp):
             self.home.add_note(Text(note, style=FAINT))
         if e.cwd_is_safety():
             self.home.add_note(Text(t("cwd.safety_note"), style=FAINT))
+        self.home.resume = e.resume_hint()          # 이어하기 카드 (M6)
         self.relabel()
         self.layout_panels()
         self.refresh_memory()
@@ -899,6 +935,8 @@ class GladosTUI(TextualApp):
         self.refresh_send(relabel=True)
         self.draw_chips()
         self.home.relabel()
+        for card in self.query(TaskCard):                 # 제목의 이름표 ("연구원님" / "You")
+            card.heading.update(card.heading_text())
         for card in self.query(TaskCard):
             card.refresh_kicker()
         self.refresh_placeholder()
@@ -1086,6 +1124,9 @@ class GladosTUI(TextualApp):
                 card.add(Text("  " + first, style=FAINT))      # "$ 명령" (제안 줄은 맥락의 과정에만)
             for style, text in event_lines(e):
                 if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.PLAN, ev.EGRESS) and side):
+                    continue
+                if style == "speaker":                    # GLaDOS의 답 앞: 코발트 점 + 이름 (연구원님 말과 구별)
+                    card.add(Text.assemble(("● ", COBALT), (text, FAINT)))
                     continue
                 card.add(Text(text, style=STYLES.get(style, STYLES["plain"])))
             if e.kind in (ev.THOUGHT, ev.PROPOSAL):
@@ -1389,6 +1430,9 @@ class GladosTUI(TextualApp):
         if cmd == "/new":
             self.new_conversation()
             return
+        if cmd == "/resume":
+            self.resume_command(text)
+            return
         self.new_card("slash", text)
         if cmd == "/undo":
             self.start_undo()
@@ -1400,12 +1444,7 @@ class GladosTUI(TextualApp):
             self.relabel()
         self.current = None
 
-    def new_conversation(self) -> None:
-        """+ 새 대화 (/new): 기억을 비우고 처음 화면으로."""
-        if self.job:
-            self.notify(t("tui.busy"), timeout=4)
-            return
-        self.engine.memory.clear()
+    def clear_cards(self) -> None:
         for card in list(self.query(TaskCard)):
             card.remove()
         for item in list(self.query(NavItem)):
@@ -1413,6 +1452,15 @@ class GladosTUI(TextualApp):
         self.query_one("#nav-empty").display = True
         self.query_one("#activity", RichLog).clear()
         self.current = self.selected = None
+
+    def new_conversation(self) -> None:
+        """+ 새 대화 (/new): 기억을 비우고 처음 화면으로 (앞의 대화는 저장돼 있어 이어하기 카드로 보인다)."""
+        if self.job:
+            self.notify(t("tui.busy"), timeout=4)
+            return
+        self.engine.forget()
+        self.clear_cards()
+        self.home.set_resume(self.engine.resume_hint())
         self.home.display = True
         self.set_presence("idle")
         self.set_state(t("tui.state.idle"))
@@ -1421,6 +1469,32 @@ class GladosTUI(TextualApp):
         self.refresh_aside()
         self.notify(t("new.done"), timeout=4)
         self.query_one(ChatInput).focus()
+
+    def resume_session(self, sid: str) -> None:
+        """처음 화면의 이어하기 카드."""
+        self.resume_command("/resume", sid)
+
+    def resume_command(self, text: str, sid: str = "") -> None:
+        """/resume: 목록 카드. /resume N (또는 카드): 그 대화를 불러오고 화면을 비운 뒤 안내 카드."""
+        if self.job:
+            self.notify(t("tui.busy"), timeout=4)
+            return
+        e = self.engine
+        if sid:
+            info = e.load_session(sid)
+            rows, loaded = (e.resumed_rows(info), True) if info is not None else ([("plain", t("resume.empty"))], False)
+        else:
+            rows, loaded = e.resume_lines(text.split()[1:])
+        if loaded:
+            self.clear_cards()
+        card = self.new_card("slash", text)
+        for style, line in rows:
+            card.add(Text(line, style=STYLES.get(style, STYLES["plain"])))
+        self.current = None
+        if loaded:
+            self.refresh_placeholder()
+            self.refresh_memory()
+            self.refresh_aside()
 
     # ------------------------------------------------------------------ 작업
     def start_task(self, shown: str, full: str) -> None:

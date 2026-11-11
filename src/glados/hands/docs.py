@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from glados.core.textfix import clean
+
 logging.getLogger("pypdf").setLevel(logging.ERROR)     # 글꼴 경고가 화면에 찍히지 않게
 
 FRONT_PAGES = 2               # 앞: 제목·저자·첫 내용
@@ -67,6 +69,8 @@ def extract(path: Path, deep: bool = False) -> Doc:
         return Doc(str(path), "error", detail=f"not a pdf or docx: {ext}")
     if doc.status == "ok" and len(re.sub(r"\s", "", doc.front + doc.body + doc.back)) < 3:   # 스캔한 그림뿐
         doc.status = "no_text"
+    for name in ("title", "creator", "front", "back", "body", "detail"):     # 깨진 글자 (M6.2)
+        setattr(doc, name, clean(getattr(doc, name)))
     return doc
 
 
@@ -171,6 +175,7 @@ def _docx(path: Path) -> Doc:
 
 def from_text(path: str, text: str) -> Doc:
     """글 전체가 있는 문서 (DOCX, 글 파일): 앞·끝·가운데로 나눠 PDF와 같은 모양으로."""
+    text = clean(text)
     half = PART_CHARS // 2
     if len(text) <= PART_CHARS:
         return Doc(path, "ok", front=text, deep=True)
@@ -215,7 +220,7 @@ class DocCache:
         try:
             with self._lock:
                 return self.con.execute(sql, params).fetchone()
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError):              # ValueError: 이름에 깨진 글자 (UnicodeEncodeError)
             return None
 
     def _write(self, sql: str, params: tuple) -> None:
@@ -224,7 +229,7 @@ class DocCache:
         try:
             with self._lock:
                 self.con.execute(sql, params)
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError):
             pass                                         # 캐시를 못 써도 찾기는 계속한다
 
     def get(self, path: Path, st: os.stat_result, deep: bool) -> Doc | None:

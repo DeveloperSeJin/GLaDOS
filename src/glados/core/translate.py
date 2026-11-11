@@ -22,6 +22,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
+from glados.core.textfix import SURROGATE
+
 HANGUL = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
 LATIN = re.compile(r"[A-Za-z]")
 HAN = re.compile(r"[㐀-䶿一-鿿豈-﫿]")            # 한자 (한국어 답에 섞이면 안 됨)
@@ -218,7 +220,7 @@ class Glossary:
             body = {"version": 1, "words": {k: list(v) for k, v in sorted(self._words.items())}}
             tmp.write_text(json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
             os.replace(tmp, self.cache_path)
-        except OSError:
+        except (OSError, ValueError):
             pass                           # 캐시를 못 써도 찾기는 계속한다
 
     def known(self, token: str) -> tuple[str, ...] | None:
@@ -228,7 +230,8 @@ class Glossary:
     def english(self, tokens: Iterable[str], deadline: float | None = None) -> dict[str, tuple[str, ...]]:
         """낱말들의 영어 키워드. 캐시에 없는 것은 한도(max_new)와 시간(deadline) 안에서 모델에게 묻는다.
         못 옮긴 낱말은 결과에 없다."""
-        wanted = list(dict.fromkeys(nfc(tok).casefold() for tok in tokens if tok and is_foreign(tok)))
+        wanted = list(dict.fromkeys(nfc(tok).casefold() for tok in tokens
+                                    if tok and is_foreign(tok) and not SURROGATE.search(tok)))   # 깨진 글자 (M6.2)
         with self._lock:
             out = {tok: self._words[tok] for tok in wanted if tok in self._words}
             missing = [tok for tok in wanted if tok not in self._words]

@@ -18,6 +18,8 @@
      읽을 주소가 이 컴퓨터나 내부 네트워크
    - remote.exec: 지우기·옮기기·덮어쓰기, 백그라운드로 띄우기(nohup, tmux new, & ...), 잇기
    - remote.run·remote.stop (M5): 매번 승인 (연구원님 결정: 실행마다 묻는다. "이 작업 동안" 없음)
+   - memory.note (M6): 매번 승인 (연구원님 결정: MEMORY.md에 남길 글을 보고 정한다).
+     비밀번호·PIN·카드 번호·키·토큰·주민등록번호가 든 글은 차단 (M6.2, 승인으로도 못 풂: 평문 파일이고 매 작업 모델에 들어감)
 4. "이 작업 동안" 승인을 받은 규칙이면 ask -> allow
 """
 
@@ -154,6 +156,10 @@ class Policy:
             decision = _d("ask", "코드:서버실행", "policy.remote_run", grantable=False)
         if call.tool == "remote.stop" and decision.verdict != "deny":
             decision = _d("ask", "코드:실행멈춤", "policy.remote_stop", grantable=False)
+        if call.tool == "memory.note" and decision.verdict != "deny":
+            if privacy.secret_in_note(str(call.args.get("text", ""))):
+                return _d("deny", "코드:비밀기억", "policy.memory_secret", grantable=False)
+            decision = _d("ask", "코드:기억", "policy.memory_note", grantable=False)
 
         # 셸 명령의 관리자 권한은 정책 파일과 상관없이 항상 승인 (작업 동안 승인 불가)
         if call.tool == "shell.run" and call.args.get("admin") and decision.verdict != "deny":

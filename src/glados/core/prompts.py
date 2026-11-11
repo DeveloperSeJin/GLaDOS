@@ -35,9 +35,11 @@ learned changes it.
 When you answer instead, set action to null and done to true.
 - When finished, set done to true. Put the facts in answer.fact (numbers first) and one dry, witty sentence in answer.wit.
   Leave wit empty for errors, approvals, warnings, and "I don't know".
-- Think and write in English: thought, tool arguments, and answer. The Researcher may write in another language; \
+- Think and write in English: thought, tool arguments (except memory.note text), and answer. The Researcher may \
+write in another language; \
 your English answer is translated for them automatically. Keep file names and paths exactly as they are.
 - Answer greetings and general questions directly, without tools.
+- If these instructions already say it (time, servers, notes), answer without tools.
 - sources: the file paths or URLs you relied on, or an empty list.
 - Remember the earlier conversation and continue from it. "It", "the file I found", and "that one" refer to it.
 - "[result: ...]" messages are tool results. "[work notes]" lists the tools an earlier task used and what they returned.
@@ -50,6 +52,12 @@ Researcher: How did hypothesis B do?
 Researcher: 다음 주 서버 점검 일정 알아?
 {"thought": "The Researcher asks about next week's server maintenance. I have no data on it.", "done": true, "answer": {"fact": "I do not know yet. Send me the maintenance notice and I will schedule the experiments around it.", "wit": ""}, "sources": []}"""
 
+NOTES_HEAD = ("Notes the Researcher asked you to keep (already loaded; never search for MEMORY.md; "
+              "memory.note skips repeats):")
+# 기억에 없는 지난 일을 말하면 먼저 불러오기 (M6.1: 4b 모델이 아래 예시를 "아까 한 일"로 착각해 그대로 따라 함)
+RESUME_RULE = '- Earlier work not in this conversation ("아까", "어제", "이어서"): call session.resume first.'
+EXAMPLE_HEAD = "Example only, not a request in this conversation"
+
 FILE_RULES = """\
 File work:
 - Do only what was asked. "Find" means report the files you found and stop. Looking inside files to tell which ones \
@@ -61,7 +69,7 @@ are matched by their English meaning, shown after "en:" in the results.
 inside: fs.search with content=true finds words in the text, fs.inspect asks your question about each file after \
 reading its first page, and fs.read reads one file in full.
 - Say only what the results say was checked. If some files were not read, say so.
-- A first reply looks like this (plan, then the first step in the same reply):
+- {example} (plan, then the first step in the same reply):
 Researcher: 문서 폴더에서 위약금 조항이 있는 계약서 찾아줘
 {"plan": ["File names may not mention penalties, so search the text inside files.", "Search Documents with \
 content=true for penalty.", "Report the files and the matching lines."], "thought": "Search the text of files in \
@@ -101,6 +109,7 @@ put personal details, file paths, or file text in them unless asked. For "latest
 - Snippets are short. Read a page with web.fetch before stating its details; for a paper, read its own page \
 (arxiv.org/abs/...) or PDF.
 - In sources, cite only URLs from tool results, exactly as shown. If search is not set up or fails, say so.
+- {example}:
 Researcher: LLM 평가 지표 최신 논문 3개 찾아서 요약해줘
 {"plan": ["Search for recent papers on LLM evaluation metrics.", "Read the top three with web.fetch.", \
 "Summarize each with its URL."], "thought": "Find recent papers first.", "action": {"tool": "web.search", \
@@ -135,8 +144,11 @@ def build_system_prompt(
     cwd: str = "",
     servers: list[str] | tuple[str, ...] = (),
     runs: str = "",
+    notes: str = "",
+    earlier: str = "",
 ) -> str:
-    """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록). 언어 안내는 reply_note()로 따로 (맨 끝에 붙임)."""
+    """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록). 언어 안내는 reply_note()로 따로 (맨 끝에 붙임).
+    notes: MEMORY.md의 메모 (연구원님이 승인한 것만, M6). earlier: 기억이 비었을 때 최근 지난 대화 몇 개 (M6.1)."""
     now = now or datetime.now()
     when = f"{now:%Y-%m-%d} ({WEEKDAYS[now.weekday()]}) {now:%H:%M}"
     env = f"Now: {when}. This computer: {os_label}. Model: {model_name}."
@@ -144,20 +156,25 @@ def build_system_prompt(
         env += f" Shell: {shell}."
     if cwd:
         env += f" Working folder (relative paths and commands start here): {cwd}."
-    layers = [persona(), ROLE, CONTRACT]
+    layers = [persona(), ROLE, CONTRACT + ("\n" + RESUME_RULE if "session.resume" in tool_names else "")]
     if any(n.startswith("fs.") for n in tool_names):
-        layers.append(FILE_RULES)
+        layers.append(FILE_RULES.replace("{example}", EXAMPLE_HEAD))
     if "shell.run" in tool_names:
         layers.append(SHELL_RULES.format(shell=shell or "the default shell"))
     if any(n.startswith("web.") for n in tool_names):
-        layers.append(WEB_RULES)
+        layers.append(WEB_RULES.replace("{example}", EXAMPLE_HEAD))
     if any(n.startswith("remote.") for n in tool_names):
         layers.append(REMOTE_RULES.format(servers="; ".join(servers) or "(none)"))
         if runs:
             env += f" {runs}"
     else:
         env += " No GPU servers are set up yet (servers.toml)."
-    layers += [EXAMPLES, env]
+    if earlier and "session.resume" in tool_names:
+        env += f" {earlier}"
+    layers.append(EXAMPLES)
+    if notes:
+        layers.append(NOTES_HEAD + "\n" + notes)
+    layers.append(env)
     return "\n\n".join(layers)
 
 

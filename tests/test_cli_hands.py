@@ -46,11 +46,12 @@ def translation(fact: str, wit: str = "") -> dict:
 def test_ask_task_prints_answer_and_keeps_history(app):
     a, out = app
     a.llm.steps = [answer("The model is qwen3.5:4b.", "Small, but diligent."),
-                   translation("모델은 qwen3.5:4b입니다.", "작지만 성실합니다.")]
+                   translation("모델은 qwen3.5:4b입니다.")]
     result = a.ask_task("지금 모델이 뭐야?")
     text = out.getvalue()
     assert result.status == "done"
-    assert "모델은 qwen3.5:4b입니다." in text and "작지만 성실합니다." in text and "Small, but" not in text
+    assert "모델은 qwen3.5:4b입니다." in text and "Small, but diligent." in text      # 위트는 영어 그대로 (M6.3)
+    assert "● GLaDOS\n모델은 qwen3.5:4b입니다.\nSmall, but diligent." in text      # 누가 말하는지 (M6.3)
     turn = a.memory.turns[-1]
     assert turn.request == "지금 모델이 뭐야?" and turn.answer == "The model is qwen3.5:4b. Small, but diligent."
 
@@ -167,10 +168,26 @@ def test_context_and_new_commands(app):
     text = out.getvalue()
     assert "지난 작업 2개를 기억합니다" in text and "1. [전체] first question" in text and "2. [전체] second question" in text
     a.command("/new")
-    assert a.memory.turns == [] and "앞의 대화는 잊었습니다" in out.getvalue()
+    assert a.memory.turns == [] and "앞의 대화는 저장해 두었습니다" in out.getvalue()
     a.llm.steps = [answer("Third answer.")]
     a.ask_task("third question")
     assert not any(m["content"] == "first question" for m in a.llm.calls[-1][0])
+    # 지난 대화 이어하기 (M6): 목록에는 지금 세션이 빠진다
+    a.command("/resume")
+    text = out.getvalue()
+    assert "1. " in text and "first question (작업 2개)" in text and "third question (작업" not in text
+    a.command("/resume 5")
+    assert "/resume 5: 목록의 번호(1~1)를 쓰세요" in out.getvalue()
+    a.command("/resume 1")
+    assert "이어서 합니다: " in out.getvalue() and "마지막 작업: second question" in out.getvalue()
+    assert [turn.request for turn in a.memory.turns] == ["first question", "second question"]
+    a.llm.steps = [answer("Fourth answer.")]
+    a.ask_task("fourth question")
+    assert any(m["content"] == "first question" for m in a.llm.calls[-1][0])     # 불러온 대화가 맥락에 있다
+    assert [t.request for t in a.sessions.turns(a.hctx.session_id)] == ["first question", "second question",
+                                                                         "fourth question"]
+    a.command("/resume")
+    assert "third question (작업 1개)" in out.getvalue()
 
 
 def test_task_is_logged(app):
@@ -193,7 +210,8 @@ def test_commands(app):
     assert a.command("/help") is False and "/undo" in out.getvalue()
     assert a.command("/servers") is False and "설정된 서버가 없습니다" in out.getvalue()
     assert a.command("/runs") is False and out.getvalue().count("설정된 서버가 없습니다") == 2   # 서버가 없으면 실행도 없음
-    assert a.command("/resume") is False and "M6" in out.getvalue()
+    assert a.command("/resume") is False and "이어 갈 지난 대화가 없습니다" in out.getvalue()
+    assert a.command("/memory") is False and "기억한 것이 없습니다" in out.getvalue()
     assert a.command("/log") is False and "기록이 없습니다" in out.getvalue()
     assert a.command("/undo") is False and "되돌릴 파일 수정이 없습니다" in out.getvalue()
     assert a.command("/quit") is True
@@ -244,7 +262,8 @@ def test_hands_load_for_each_os(os_name, app):
     a, _ = app
     assert load_hands(os_name).names() == []                      # 손 정보가 없으면 도구 없음
     reg = load_hands(os_name, a.hctx)
-    assert reg.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run", "web.search", "web.fetch"]
+    assert reg.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run", "web.search", "web.fetch",
+                           "session.resume", "memory.note"]
     assert "fs.search(query, kind?, year?, roots?, content?, limit?)" in reg.describe()
 
 
@@ -324,8 +343,9 @@ def test_started_in_glados_folder_moves_to_the_workspace(app, tmp_path):
     assert a.workspace() == a.cfg.workspace                        # folders.toml workspace가 먼저
     a.set_cwd(str(tmp_path / "logs"))                              # GLADOS_HOME 안 (안전장치)
     assert a.cwd_is_safety()
-    moved = a.leave_safety_cwd()
+    assert a.leave_safety_cwd(dev=False) == "" and a.cwd_is_safety()   # 설치한 glados: 연 폴더 그대로 (M6.2)
+    moved = a.leave_safety_cwd(dev=True)                           # uv run glados (저장소의 .venv)
     assert moved == a.cfg.workspace and a.places.cwd == moved and a.hctx.places.cwd == moved
     assert (tmp_path.parent / (tmp_path.name + "-ws")).is_dir() and not a.cwd_is_safety()
-    assert a.leave_safety_cwd() == ""                              # 이미 밖이면 그대로
+    assert a.leave_safety_cwd(dev=True) == ""                      # 이미 밖이면 그대로
     assert "(relative paths and commands start here): " + moved in a.system_prompt()

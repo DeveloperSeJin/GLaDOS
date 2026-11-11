@@ -12,7 +12,7 @@ from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 ALL_TOOLS = frozenset({
     "fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "fs.trash", "shell.run",
     "web.search", "web.fetch", "remote.gpu", "remote.log", "remote.exec", "remote.run", "remote.stop", "remote.projects",
-    "git.snapshot", "ask.user",
+    "git.snapshot", "ask.user", "session.resume", "memory.note",
 })
 
 

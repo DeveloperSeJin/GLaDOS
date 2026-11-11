@@ -20,6 +20,7 @@ import httpx
 from pydantic import ValidationError
 
 from glados.config import ModelConfig
+from glados.core.textfix import clean_any
 from glados.i18n import KeyedError
 
 T = TypeVar("T")
@@ -184,7 +185,7 @@ class OllamaClient:
     def _call(self, messages: list[dict[str, str]], schema: dict[str, Any], temperature: float) -> str:
         body: dict[str, Any] = {
             "model": self.cfg.name,
-            "messages": messages,
+            "messages": clean_any(messages),            # 깨진 글자가 있으면 JSON을 못 만든다 (M6.2)
             "stream": False,
             "format": schema,
             "keep_alive": self.cfg.keep_alive,
