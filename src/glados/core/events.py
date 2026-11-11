@@ -8,12 +8,14 @@ from typing import Any
 
 # 이벤트 종류
 START = "start"            # 작업 시작 {request}
+PLAN = "plan"              # 모델이 세운 계획 {step, plan: [단계...]} (첫 걸음, 바꿀 때)
 THOUGHT = "thought"        # 모델의 판단 근거 {step, thought}
 PROPOSAL = "proposal"      # 도구 호출 제안 {step, tool, args}
 DECISION = "decision"      # 정책 판정 {tool, verdict, rule, reason, decided_by}
 OBSERVATION = "observation"  # 도구 결과 요약 {tool, text}
 ANSWER = "answer"          # 최종 답 {fact, wit, sources}
-STOP = "stop"              # 끝나지 못하고 멈춤 {reason, detail}
+STOP = "stop"              # 끝나지 못하고 멈춤 {reason, message, detail, answered}
+GUARD = "guard"            # 안전망이 모델을 되돌림 {step, message}
 
 
 @dataclass

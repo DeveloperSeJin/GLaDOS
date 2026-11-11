@@ -16,6 +16,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from glados.i18n import DEFAULT_LANG, LANGS, KeyedError, t
+
 # 사용자 폴더 파일 이름 -> 패키지 안의 기본 파일 이름
 DEFAULT_FILES: dict[str, str] = {
     "glados.toml": "glados.toml",
@@ -24,10 +26,14 @@ DEFAULT_FILES: dict[str, str] = {
     "policy.yaml": "policy.user.yaml",
 }
 SUBDIRS = ("logs", "checkpoints")
+SCREENS = ("tui", "plain")      # [ui] screen: TUI(기본) 또는 줄 화면
 
 
-class ConfigError(Exception):
-    """설정 파일을 읽을 수 없거나 값이 잘못됨."""
+class ConfigError(KeyedError):
+    """설정 파일을 읽을 수 없거나 값이 잘못됨. 글은 한국어, 화면은 키로 그 언어."""
+
+    def __init__(self, key: str, **params: Any):
+        super().__init__(t(key, "ko", **params), key, **params)
 
 
 def glados_home(env: Mapping[str, str] | None = None) -> Path:
@@ -97,6 +103,9 @@ class Config:
     servers: list[Server] = field(default_factory=list)
     # (층 이름, 규칙) 목록. 기본 → 연구원님 순서. 마지막에 맞는 규칙이 이긴다
     policy_layers: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    language: str = DEFAULT_LANG     # 화면 언어 "ko" | "en" (답은 물은 언어로)
+    screen: str = "tui"              # 화면 종류 "tui" | "plain" (glados --plain/--tui가 먼저)
+    motion: bool = True              # TUI의 움직이는 표시 (작업 중 로고의 점). 끄면 멈춘 그림만
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -106,18 +115,18 @@ def _read_toml(path: Path) -> dict[str, Any]:
     except FileNotFoundError:
         return {}
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"{path.name}을(를) 읽을 수 없습니다: {e}") from e
+        raise ConfigError("config.unreadable", name=path.name, detail=str(e)) from e
 
 
 def parse_policy_text(text: str, source: str) -> dict[str, Any]:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise ConfigError(f"{source}을(를) 읽을 수 없습니다: {e}") from e
+        raise ConfigError("config.unreadable", name=source, detail=str(e)) from e
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise ConfigError(f"{source}의 최상위는 '도구: {{패턴: 판정}}' 형태여야 합니다")
+        raise ConfigError("config.policy_shape", name=source)
     return data
 
 
@@ -129,7 +138,7 @@ def load_config(home: Path) -> Config:
     model_sec = main.get("model", {})
     mode = str(model_sec.get("mode", "normal"))
     if mode not in ("normal", "low"):
-        raise ConfigError(f'glados.toml의 model.mode는 "normal" 또는 "low"여야 합니다 (지금: {mode})')
+        raise ConfigError("config.mode", value=mode)
     picked = model_sec.get(mode, {})
     model = ModelConfig(
         host=str(model_sec.get("host", ModelConfig.host)).rstrip("/"),
@@ -139,6 +148,17 @@ def load_config(home: Path) -> Config:
         keep_alive=str(model_sec.get("keep_alive", "30m")),
         mode=mode,
     )
+
+    ui = main.get("ui", {})
+    language = str(ui.get("language", DEFAULT_LANG)).strip().lower()
+    if language not in LANGS:
+        raise ConfigError("config.language", value=language)
+    screen = str(ui.get("screen", "tui")).strip().lower()
+    if screen not in SCREENS:
+        raise ConfigError("config.screen", value=screen)
+    motion = ui.get("motion", True)
+    if not isinstance(motion, bool):
+        raise ConfigError("config.motion", value=motion)
 
     loop_sec = main.get("loop", {})
     limits = LoopLimits(**{k: int(v) for k, v in loop_sec.items() if k in LoopLimits.__dataclass_fields__})
@@ -170,4 +190,17 @@ def load_config(home: Path) -> Config:
         extra_protected=[str(p) for p in folders.get("extra_protected", [])],
         servers=server_list,
         policy_layers=layers,
+        language=language,
+        screen=screen,
+        motion=motion,
     )
+
+
+def peek_language(home: Path) -> str:
+    """설정을 다 읽기 전에 화면 언어만 (관리자 확인·설정 오류 안내용). 못 읽으면 기본값."""
+    try:
+        with (home / "glados.toml").open("rb") as f:
+            value = str(tomllib.load(f).get("ui", {}).get("language", DEFAULT_LANG)).strip().lower()
+    except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        return DEFAULT_LANG
+    return value if value in LANGS else DEFAULT_LANG

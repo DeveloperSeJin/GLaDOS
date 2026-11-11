@@ -10,7 +10,7 @@ from glados.safety.locations import Places
 from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 
 ALL_TOOLS = frozenset({
-    "fs.search", "fs.read", "fs.write_new", "fs.edit", "fs.trash", "shell.run",
+    "fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "fs.trash", "shell.run",
     "web.search", "web.fetch", "remote.gpu", "remote.log", "remote.exec", "git.snapshot", "ask.user",
 })
 
@@ -39,6 +39,15 @@ def base_layers() -> list[tuple[str, dict[str, Any]]]:
     return [("기본", parse_policy_text(default_text("policy.yaml"), "기본"))]
 
 
+@pytest.fixture(autouse=True)
+def _korean_screen():
+    """화면 언어는 전역이라, 영어로 바꾼 시험이 다른 시험에 새지 않게."""
+    from glados import i18n
+    i18n.set_language("ko")
+    yield
+    i18n.set_language("ko")
+
+
 @pytest.fixture
 def policy() -> Policy:
     return Policy(base_layers())
@@ -63,7 +72,7 @@ class FakeLLM:
     def chat_json(self, messages, schema, validate, retries=2, temperature=0.2):
         self.calls.append((list(messages), schema))
         item = self.steps.pop(0)
-        if isinstance(item, Exception):
+        if isinstance(item, BaseException):        # LLMError, 멈춤(Cancelled)
             raise item
         return validate(item), json.dumps(item, ensure_ascii=False)
 
@@ -71,9 +80,40 @@ class FakeLLM:
         return True
 
 
-def answer(fact: str = "끝났습니다.", wit: str = "", sources: list[str] | None = None) -> dict[str, Any]:
-    return {"thought": "답한다", "done": True, "answer": {"fact": fact, "wit": wit}, "sources": sources or []}
+class StaticGlossary:
+    """모델 없이 정해 둔 낱말 -> 영어 키워드 (찾기 시험용). 진짜 Glossary와 같은 english()를 갖는다."""
+
+    WORDS: dict[str, tuple[str, ...]] = {
+        "계약": ("contract", "agreement"), "계약서": ("contract", "agreement"),
+        "외주개발": ("outsourcing", "development"), "임대": ("lease", "rental"),
+        "회의록": ("minutes", "meeting", "notes"), "예전메모": ("old", "memo", "note"),
+        "학위논문": ("thesis", "dissertation", "paper"), "논문": ("paper", "thesis"), "논문초안": ("paper", "draft"),
+        "다운로드": ("download", "downloads"), "폴더": ("folder",), "문서": ("documents", "document"),
+        "바탕화면": ("desktop",), "홈": ("home",), "노트": ("note", "notebook"), "메모": ("memo", "note"),
+        "발표": ("presentation", "slides"), "실험": ("experiment",), "계획": ("plan",), "요약": ("summary",),
+        "최종": ("final",), "설명": ("description",), "분석": ("analysis",), "시험": ("test", "exam"),
+        "초안": ("draft",), "긴글": ("long", "text"), "그림": ("picture", "image"), "보고서": ("report",),
+    }
+
+    def __init__(self, words: dict[str, tuple[str, ...]] | None = None):
+        self.words = dict(self.WORDS if words is None else words)
+        self.asked: list[str] = []
+
+    def english(self, tokens, deadline=None):
+        import unicodedata
+
+        out = {}
+        for tok in tokens:
+            key = unicodedata.normalize("NFC", tok).casefold()
+            self.asked.append(key)
+            if key in self.words:
+                out[key] = self.words[key]
+        return out
+
+
+def answer(fact: str = "Done.", wit: str = "", sources: list[str] | None = None) -> dict[str, Any]:
+    return {"thought": "Answer now.", "done": True, "answer": {"fact": fact, "wit": wit}, "sources": sources or []}
 
 
 def act(tool: str, **args: Any) -> dict[str, Any]:
-    return {"thought": f"{tool}를 부른다", "done": False, "action": {"tool": tool, "args": args}}
+    return {"thought": f"Call {tool}.", "done": False, "action": {"tool": tool, "args": args}}

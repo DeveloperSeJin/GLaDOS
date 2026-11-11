@@ -53,7 +53,7 @@ def test_bad_json_is_retried_with_error_message():
 
     step, _ = chat(client(handler))
     assert step.done and len(seen) == 2
-    assert "형식 오류" in seen[1]["messages"][-1]["content"]
+    assert seen[1]["messages"][-1]["content"].startswith("Format error:")
 
 
 def test_validation_error_is_retried():
@@ -110,3 +110,157 @@ def test_has_model():
     assert client(lambda req: httpx.Response(200, json=tags)).has_model()
     other = {"models": [{"name": "qwen3:8b"}]}
     assert not client(lambda req: httpx.Response(200, json=other)).has_model()
+
+
+# ---------------------------------------------------------------- 스트리밍과 멈춤 (TUI)
+import threading  # noqa: E402
+
+from glados.core.llm import Cancelled, LLMError  # noqa: E402
+
+
+def stream_lines(*pieces: str) -> bytes:
+    lines = [json.dumps({"message": {"role": "assistant", "content": p}, "done": False}, ensure_ascii=False)
+             for p in pieces]
+    lines.append(json.dumps({"message": {"role": "assistant", "content": ""}, "done": True}))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def streaming(handler, **kw) -> OllamaClient:
+    c = client(handler, **kw)
+    c.stop_event = threading.Event()
+    return c
+
+
+def test_stream_is_used_when_stoppable():
+    seen = []
+    text = json.dumps(GOOD, ensure_ascii=False)
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(200, content=stream_lines(text[:7], text[7:30], text[30:]))
+
+    step, raw = chat(streaming(handler))
+    assert seen[0]["stream"] is True and json.loads(raw) == GOOD and step.done
+
+
+def test_stop_before_call_and_while_streaming():
+    c = streaming(lambda req: httpx.Response(200, content=stream_lines("{")))
+    c.stop_event.set()
+    with pytest.raises(Cancelled):
+        chat(c)
+
+    ev = threading.Event()
+    got = []
+
+    def handler(req):
+        def body():
+            yield stream_lines('{"thought": ')[:-len(b'{"message": {"role": "assistant", "content": ""}, "done": true}\n')]
+            ev.set()                                      # 연구원님이 멈춤
+            got.append("second chunk asked")
+            yield stream_lines('"x", "done": true}')
+        return httpx.Response(200, content=body())
+
+    c = client(handler)
+    c.stop_event = ev
+    with pytest.raises(Cancelled):
+        chat(c)
+
+
+def test_stream_errors_are_reported():
+    c = streaming(lambda req: httpx.Response(404, json={"error": "model not found"}))
+    with pytest.raises(ModelMissing):
+        chat(c)
+    c = streaming(lambda req: httpx.Response(200, content=b'{"error": "out of memory"}\n'))
+    with pytest.raises(LLMError) as e:
+        chat(c)
+    assert e.value.key == "llm.http" and "out of memory" in str(e.value)
+
+
+def test_stream_think_fallback():
+    seen = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        seen.append(body)
+        if "think" in body:
+            return httpx.Response(400, json={"error": "does not support thinking"})
+        return httpx.Response(200, content=stream_lines(json.dumps(GOOD)))
+
+    step, _ = chat(streaming(handler, think=True))
+    assert step.done and "think" in seen[0] and "think" not in seen[1] and seen[1]["stream"] is True
+
+
+def test_cancelled_passes_through_except_exception():
+    """도구·번역이 `except Exception`으로 감싸도 멈춤은 지나간다."""
+    assert not issubclass(Cancelled, Exception) and issubclass(Cancelled, BaseException)
+
+
+# ---------------------------------------------------------------- 계량 (TUI가 보여 주는 토큰)
+def counted_lines(*pieces: str, prompt: int, output: int) -> bytes:
+    lines = [json.dumps({"message": {"role": "assistant", "content": p}, "done": False}, ensure_ascii=False)
+             for p in pieces]
+    lines.append(json.dumps({"message": {"role": "assistant", "content": ""}, "done": True,
+                             "prompt_eval_count": prompt, "eval_count": output}))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def test_meter_counts_tokens_and_keeps_the_received_text():
+    from glados.core.llm import Meter
+
+    text = json.dumps(GOOD, ensure_ascii=False)
+    seen_live = []
+    c = streaming(lambda req: httpx.Response(200, content=counted_lines(text[:10], text[10:], prompt=1200, output=48)))
+    c.meter = meter = Meter()
+    real_piece = meter.piece
+
+    def piece(t):
+        real_piece(t)
+        seen_live.append(meter.snapshot())        # 받는 동안: 조각 수만큼, 부르는 중
+
+    meter.piece = piece
+    chat(c)
+    assert [(s[1], s[3]) for s in seen_live] == [(1, True), (2, True)]
+    assert seen_live[0][2] == text[:10]
+    sent, received, live, active = meter.snapshot()
+    assert (sent, received, active) == (1200, 48, False)              # 끝나면 Ollama가 센 값으로
+    assert live == text                                               # 받은 글은 다음 호출까지 남는다
+    chat(c)
+    assert meter.snapshot()[:2] == (2400, 96) and meter.calls == 2    # 호출마다 더한다
+    meter.reset()
+    assert meter.snapshot() == (0, 0, "", False)
+
+
+def test_meter_without_counts_and_on_plain_calls():
+    from glados.core.llm import Meter
+
+    text = json.dumps(GOOD, ensure_ascii=False)
+    c = streaming(lambda req: httpx.Response(200, content=stream_lines(text[:5], text[5:])))
+    c.meter = meter = Meter()
+    chat(c)
+    assert meter.snapshot()[:2] == (0, 2)                             # 셈이 없으면 받은 조각 수
+    plain = client(lambda req: httpx.Response(200, json={"message": {"content": text}, "done": True,
+                                                         "prompt_eval_count": 50, "eval_count": 9}))
+    plain.meter = meter = Meter()
+    chat(plain)
+    assert meter.snapshot() == (50, 9, text, False)                   # 스트리밍이 아니어도
+
+
+def test_meter_ends_the_call_when_stopped():
+    from glados.core.llm import Meter
+
+    ev = threading.Event()
+
+    def handler(req):
+        def body():
+            yield stream_lines('{"thought": ')[:-len(b'{"message": {"role": "assistant", "content": ""}, "done": true}\n')]
+            ev.set()
+            yield stream_lines('"x", "done": true}')
+        return httpx.Response(200, content=body())
+
+    c = client(handler)
+    c.stop_event = ev
+    c.meter = meter = Meter()
+    with pytest.raises(Cancelled):
+        chat(c)
+    sent, received, live, active = meter.snapshot()
+    assert not active and received == 1 and live == '{"thought": '

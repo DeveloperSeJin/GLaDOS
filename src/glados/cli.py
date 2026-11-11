@@ -1,49 +1,62 @@
-"""터미널 화면: 대화(REPL)와 한 줄 실행 (`glados "..."`).
+"""줄 화면: 대화(REPL)와 한 줄 실행 (`glados "..."`). 엔진 연결(App)도 여기 있다 (TUI가 같이 쓴다).
 
-- 입력은 input()으로 받는다. 한글 조합(IME)을 터미널에 맡기는 가장 단순한 방식이라
-  Windows Terminal에서도 한글이 가장 덜 깨진다. M1 첫날 한글 입력 시험의 대상
-- 화면 출력은 이 파일에만 둔다. 엔진은 이벤트만 낸다
+- `glados`는 터미널이면 TUI 화면(tui.py)으로 연다. `glados --plain`이나 [ui] screen = "plain"이면 이 줄 화면
+- 줄 화면의 입력은 input()으로 받는다. 한글 조합(IME)을 터미널에 맡기는 가장 단순한 방식이라
+  Windows Terminal에서도 한글이 가장 덜 깨진다. TUI에서 한글 입력이 이상하면 이 화면을 쓴다
+- 화면 출력은 화면 파일(cli.py, tui.py)에만 둔다. 엔진은 이벤트만 낸다. 이벤트 -> 화면 줄은 event_lines() 하나
+- 화면 글은 모두 i18n 표에서 가져온다 (glados.toml [ui] language, /lang으로 이번 세션만 바꾸기)
+- 엔진 안쪽은 영어 (M2.5). 답은 연구원님이 쓴 언어로 번역되어 온다 (ANSWER 이벤트). 번역을 못 하면 영어 그대로
 - 사실(fact)은 굵게, 위트(wit)는 흐리게, 결정(승인)은 코발트
 """
 
 from __future__ import annotations
 
+import os
+import re
 import sys
+from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
 import glados
-from glados import __version__, osinfo
-from glados.config import Config, ConfigError, ensure_home, glados_home, load_config
+from glados import __version__, i18n, osinfo
+from glados.config import Config, ConfigError, ensure_home, glados_home, load_config, peek_language
 from glados.core import events as ev
+from glados.core.context import BRIEF, CLIPPED, DROPPED, FULL, MESSAGE_OVERHEAD, TASK_RESERVE, Conversation, limit_chars
 from glados.core.events import Event
-from glados.core.llm import LLMError, OllamaClient, OllamaUnavailable
-from glados.core.loop import TaskResult, run_task
-from glados.core.prompts import build_system_prompt
-from glados.hands import load_hands
+from glados.core.guards import DEFAULT_GUARDS, about_files
+from glados.core.llm import Cancelled, LLMError, OllamaClient, OllamaUnavailable
+from glados.core.loop import TaskResult, clip_output, run_task
+from glados.core.prompts import build_system_prompt, reply_note
+from glados.core.translate import Glossary, Translator, reply_language
+from glados.hands import HandContext, ToolError, load_hands
+from glados.hands import shell
+from glados.i18n import localized, t
 from glados.memory.log import PolicyLog, TaskLog, summarize_args
-from glados.safety.locations import Places
+from glados.safety.checkpoint import Checkpoints
+from glados.safety.locations import Places, classify, normalize
 from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 
-HISTORY_TURNS = 6   # 맥락에 남길 지난 대화 수
+LATER = {"/servers": "M4", "/runs": "M5", "/resume": "M6"}
+LEVELS = (FULL, CLIPPED, BRIEF, DROPPED)
+STOPS = {"format", "same_call", "tool_errors", "max_steps", "user"}   # 엔진이 키로 알려 주는 멈춤 이유
+SOURCES_SHOWN = 3        # 화면에 보여 줄 출처 수
+SHELL_LINES_SHOWN = 12   # GLaDOS가 실행한 명령의 출력을 화면에 몇 줄까지
+DIRECT_LINES_SHOWN = 200  # !명령 출력을 화면에 몇 줄까지
+DIRECT_TIMEOUT_S = 600   # !명령 시간 제한 (Ctrl+C로 언제든 멈춤)
+CD = re.compile(r"^(?:cd|chdir|Set-Location|sl)(?:\s+(.*))?$", re.IGNORECASE)
 
-USAGE = """사용법
-  glados              대화 시작
-  glados "할 일"      한 줄로 맡기고 답을 받은 뒤 끝냄
-  glados --version    버전
 
-설정·기록 폴더: GLADOS_HOME 환경 변수, 없으면 ~/.glados"""
-
-HELP = """명령어
-  /help     이 도움말
-  /new      새 작업 (앞의 대화를 맥락에서 뺌)
-  /log      최근 정책 판정 10개
-  /quit     끝내기
-  /undo /servers /runs /resume   다음 단계에서 만듭니다
-작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다."""
-
-LATER = {"/undo": "M2", "/servers": "M4", "/runs": "M5", "/resume": "M6"}
+@dataclass
+class Direct:
+    """!명령 하나의 결과 (화면이 보여 줄 것)."""
+    command: str
+    cwd: str
+    result: shell.CommandResult | None = None
+    error: str = ""
+    interrupted: bool = False
 
 
 class Screen:
@@ -63,8 +76,83 @@ class Screen:
     def cobalt(self, text: str) -> str:
         return self._style("38;2;77;124;255", text)   # #4D7CFF, 결정에만
 
+    def styled(self, style: str, text: str) -> str:
+        """event_lines()의 모양 이름 -> 이 화면의 글."""
+        if style == "fact":
+            return self.bold(text)
+        if style in ("wit", "dim"):
+            return self.dim(text)
+        if style == "decision":
+            return self.cobalt(text)
+        return text
+
     def say(self, text: str = "") -> None:
         print(text, file=self.out, flush=True)
+
+
+class _Keyed:
+    """이벤트에 담긴 키와 값을 localized()에 넘기는 작은 그릇."""
+
+    def __init__(self, key: str, params: dict):
+        self.key = key
+        self.params = tuple(params.items())
+
+
+def _brief(args: dict, limit: int = 100) -> str:
+    """도구 인자를 한 줄로 (긴 값은 자름)."""
+    parts = []
+    for k, v in args.items():
+        text = str(v).replace("\n", " ")
+        parts.append(f"{k}={text[:40] + '...' if len(text) > 40 else text}")
+    line = " ".join(parts)
+    return line if len(line) <= limit else line[:limit] + "..."
+
+
+def event_lines(e: Event) -> list[tuple[str, str]]:
+    """엔진 이벤트 하나 -> 화면 줄 [(모양, 글)]. 줄 화면과 TUI가 같이 쓴다.
+
+    모양: fact(굵게, 사실) · wit(흐리게, 위트) · dim(흐리게, 과정) · plain."""
+    d = e.data
+    out: list[tuple[str, str]] = []
+    if e.kind == ev.START:
+        out.append(("dim", t("render.working")))
+    elif e.kind == ev.ANSWER:
+        out.append(("fact", d["fact"]))
+        if d.get("wit"):
+            out.append(("wit", d["wit"]))
+        if d.get("untranslated"):
+            out.append(("dim", t("render.untranslated")))
+        sources = list(d.get("sources") or [])
+        if len(sources) > SOURCES_SHOWN:
+            out.append(("dim", t("render.sources_more", sources=", ".join(sources[:SOURCES_SHOWN]),
+                                 count=len(sources) - SOURCES_SHOWN)))
+        elif sources:
+            out.append(("dim", t("render.sources", sources=", ".join(sources))))
+    elif e.kind == ev.OBSERVATION and d.get("tool") == "shell.run":
+        lines = str(d.get("text", "")).splitlines()[1:]          # 첫 줄($ 명령)은 위에 이미 나옴
+        out.extend(("dim", "  " + line) for line in lines[:SHELL_LINES_SHOWN])
+        if len(lines) > SHELL_LINES_SHOWN:
+            out.append(("dim", "  ..."))
+    elif e.kind == ev.PLAN:
+        out.append(("dim", t("render.plan")))
+        out.extend(("dim", f"  {i}. {step}") for i, step in enumerate(d.get("plan") or [], 1))
+    elif e.kind == ev.PROPOSAL:
+        out.append(("dim", f"... {d['tool']} {_brief(d.get('args', {}))}"))
+    elif e.kind == ev.DECISION and d["verdict"] == "deny":
+        reason = localized(_Keyed(d.get("key", ""), d.get("params", {})), fallback=d["reason"])
+        out.append(("dim", t("render.blocked", tool=d["tool"], reason=reason)))
+    elif e.kind == ev.GUARD:
+        out.append(("dim", "... " + t(d.get("key") or "guard.evidence")))
+    elif e.kind == ev.STOP:
+        reason = d.get("reason")
+        message = t(f"stop.{reason}", **d.get("params", {})) if reason in STOPS else d["message"]
+        if d.get("answered"):
+            out.append(("dim", f"({message})"))      # 답은 위에 나왔으니 멈춘 이유만 흐리게
+        else:
+            out.append(("plain", message))
+            if reason == "tool_errors" and d.get("detail"):
+                out.append(("dim", t("stop.error_detail", detail=d["detail"])))
+    return out
 
 
 def source_dirs() -> tuple[str, ...]:
@@ -80,40 +168,78 @@ class App:
     def __init__(self, cfg: Config, screen: Screen, llm=None, os_name: str | None = None):
         self.cfg = cfg
         self.screen = screen
+        i18n.set_language(cfg.language)
         self.os = os_name or osinfo.current_os()
         self.llm = llm if llm is not None else OllamaClient(cfg.model)
-        self.tools = load_hands(self.os)
         self.policy = Policy(cfg.policy_layers)
-        self.places = Places.for_this_computer(
-            cfg.home, source_dirs=source_dirs(), extra_protected=tuple(cfg.extra_protected)
+        self.places = replace(
+            Places.for_this_computer(cfg.home, source_dirs=source_dirs(), extra_protected=tuple(cfg.extra_protected)),
+            cwd=os.getcwd(),                              # 작업 폴더: GLaDOS를 실행한 곳 (!cd로 바꿈)
         )
+        self.hctx = HandContext(
+            places=self.places,
+            home=cfg.home,
+            search_default=list(cfg.search_default),
+            checkpoints=Checkpoints(cfg.home),
+            user_dirs=osinfo.user_folders(self.places.home, self.os),
+            command_timeout_s=max(5, cfg.limits.local_timeout_s - 5),
+            glossary=Glossary(self.llm, cfg.home / "cache" / "names-en.json"),   # 이름 속 낱말 -> 영어 (찾기)
+            llm=self.llm, model_name=cfg.model.name,                             # fs.inspect가 파일마다 묻는 모델
+        )
+        self.translator = Translator(self.llm)            # 모델의 영어 답 -> 연구원님의 언어
+        self.tools = load_hands(self.os, self.hctx)
         self.task_log = TaskLog(cfg.home)
         self.policy_log = PolicyLog(cfg.home)
-        self.history: list[dict[str, str]] = []
-        self.system_prompt = build_system_prompt(osinfo.OS_LABELS[self.os], cfg.model.name)
+        self.memory = Conversation()                      # 이 세션의 대화 (지난 작업을 통째로 기억)
+        self.context_chars = limit_chars(cfg.model.num_ctx)
+
+    def system_prompt(self) -> str:
+        """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록)."""
+        names = self.tools.names()
+        return build_system_prompt(
+            osinfo.OS_LABELS[self.os], self.cfg.model.name, tool_names=names,
+            shell=shell.shell_label(self.os) if "shell.run" in names else "",
+            cwd=self.places.cwd or "",
+        )
+
+    def set_cwd(self, path: str) -> None:
+        self.places = replace(self.places, cwd=path)
+        self.hctx.places = self.places
+
+    def cwd_is_safety(self) -> bool:
+        return classify(self.places.cwd or self.places.home, self.places).safety
+
+    def history_budget(self) -> int:
+        """다음 작업에서 지난 대화에 쓸 글자 수 (루프가 작업을 시작할 때 쓰는 것과 같은 계산)."""
+        note = max(len(reply_note("en")), len(reply_note("ko")))
+        system = len(self.system_prompt()) + 2 + len(self.tools.describe()) + 2 + note + MESSAGE_OVERHEAD
+        return max(0, self.context_chars - system - TASK_RESERVE)
 
     # ------------------------------------------------------------------
     def header(self) -> str:
-        mode = " (낮은 모드)" if self.cfg.model.is_low else ""
-        return f"GLaDOS v0 · 모델 {self.cfg.model.name}{mode} · {osinfo.OS_LABELS[self.os]} · 기록 {self.cfg.home}"
+        mode = t("header.low") if self.cfg.model.is_low else ""
+        return t("header", model=self.cfg.model.name, mode=mode, os=osinfo.OS_LABELS[self.os], home=self.cfg.home)
 
     def check_model(self) -> bool:
         s = self.screen
         try:
             if not self.llm.has_model():
-                s.say(f"모델 {self.cfg.model.name}이(가) 없습니다. 'ollama pull {self.cfg.model.name}'으로 받은 뒤 다시 실행하세요.")
+                s.say(t("model.missing", model=self.cfg.model.name))
                 return False
         except OllamaUnavailable:
-            s.say(f"Ollama에 연결할 수 없습니다 ({self.cfg.model.host}). Ollama가 켜져 있는지 확인하세요.")
+            s.say(t("ollama.unreachable", host=self.cfg.model.host))
             return False
         except LLMError as e:
-            s.say(f"Ollama를 확인할 수 없습니다. {e}")
+            s.say(t("ollama.check_failed", detail=localized(e)))
             return False
         return True
 
     # ------------------------------------------------------------------
-    def ask_task(self, request: str) -> TaskResult | None:
+    def ask_task(self, request: str, cancelled=None) -> TaskResult | None:
+        """작업 하나. cancelled: 연구원님이 멈췄는지 (TUI의 멈춤 키). 줄 화면은 Ctrl+C."""
         task_id = self.task_log.new_task(request)
+        self.hctx.task_id = task_id
+        lang = reply_language(request, default=i18n.get_language())   # 연구원님이 쓴 언어 (답을 이 언어로 번역)
         ctx = PolicyContext(places=self.places, registered_tools=frozenset(self.tools.names()))
 
         def emit(e: Event) -> None:
@@ -131,57 +257,54 @@ class App:
                 ctx=ctx,
                 tools=self.tools,
                 limits=self.cfg.limits,
-                system_prompt=self.system_prompt,
-                history=self.history[-HISTORY_TURNS * 2:],
+                system_prompt=self.system_prompt(),
+                final_note=reply_note(lang),
+                memory=self.memory,
+                context_chars=self.context_chars,
                 emit=emit,
                 approve=self.approve,
                 audit=audit,
                 overflow_dir=self.cfg.home / "logs" / "outputs",
                 task_id=task_id,
+                evidence_check=about_files,
+                answer_guards=DEFAULT_GUARDS,
+                translator=self.translator,
+                reply_lang=lang,
+                cancelled=cancelled,
             )
+        except Cancelled:                                # 보통은 루프가 받아 멈춤으로 돌려준다
+            self._abort(task_id, "user", t("stop.user", "en"), t("stop.user"))
+            return None
         except KeyboardInterrupt:
-            self._abort(task_id, "user", "멈췄습니다.")
+            shell.kill_running(self.os)                  # GLaDOS가 돌리던 명령도 끝낸다
+            self._abort(task_id, "user", t("task.interrupted", "en"), t("task.interrupted"))
             return None
         except LLMError as e:
-            self._abort(task_id, "llm", f"모델을 부를 수 없습니다. {e}")
+            self._abort(task_id, "llm", t("task.llm_failed", "en", detail=str(e)),
+                        t("task.llm_failed", detail=localized(e)))
             return None
 
         self.task_log.finish(task_id, result.status)
-        if result.status == "done" and result.answer is not None:
-            reply = result.answer.fact + (f" {result.answer.wit}" if result.answer.wit else "")
-            self.history += [{"role": "user", "content": request}, {"role": "assistant", "content": reply}]
+        self.memory.add(request, result)
         return result
 
-    def _abort(self, task_id: str, reason: str, message: str) -> None:
-        self.task_log.event(task_id, Event(ev.STOP, {"reason": reason, "message": message}))
+    def _abort(self, task_id: str, reason: str, logged: str, shown: str) -> None:
+        """기록은 영어(엔진 안쪽), 화면은 지금 언어."""
+        self.task_log.event(task_id, Event(ev.STOP, {"reason": reason, "message": logged}))
         self.task_log.finish(task_id, "stopped")
-        self.screen.say(message)
+        self.screen.say(shown)
 
     # ------------------------------------------------------------------
     def render(self, e: Event) -> None:
         s = self.screen
-        d = e.data
-        if e.kind == ev.START:
-            s.say(s.dim("작업 중..."))
-        elif e.kind == ev.ANSWER:
-            s.say(s.bold(d["fact"]))
-            if d.get("wit"):
-                s.say(s.dim(d["wit"]))
-            if d.get("sources"):
-                s.say(s.dim("출처: " + ", ".join(d["sources"])))
-        elif e.kind == ev.PROPOSAL:
-            s.say(s.dim(f"... {d['tool']}"))
-        elif e.kind == ev.DECISION and d["verdict"] == "deny":
-            s.say(s.dim(f"[차단] {d['tool']}: {d['reason']}"))
-        elif e.kind == ev.STOP:
-            s.say(d["message"])
+        for style, text in event_lines(e):
+            s.say(s.styled(style, text))
 
     def approve(self, call: ToolCall, d: Decision) -> str:
         s = self.screen
-        s.say(s.cobalt("[승인 필요]") + f" {d.reason}")
+        s.say(s.cobalt(t("approve.title")) + " " + localized(d, fallback=d.reason))
         s.say(f"  {call.tool} {summarize_args(call.args, 120)}")
-        options = "  1) 이번만   2) 이 작업 동안   3) 거절" if d.grantable else "  1) 이번만   3) 거절"
-        s.say(options)
+        s.say(t("approve.options_task") if d.grantable else t("approve.options"))
         while True:
             try:
                 choice = input("> ").strip()
@@ -194,40 +317,187 @@ class App:
                 return "task"
             if choice == "3":
                 return "deny"
-            s.say(s.dim("1, 2, 3 중에서 골라 주세요." if d.grantable else "1 또는 3을 골라 주세요."))
+            s.say(s.dim(t("choose.123") if d.grantable else t("choose.13")))
 
     # ------------------------------------------------------------------
     def command(self, text: str) -> bool:
         """/명령을 처리한다. 끝내야 하면 True."""
         s = self.screen
-        cmd = text.split()[0].lower()
+        words = text.split()
+        cmd = words[0].lower()
         if cmd in ("/quit", "/exit", "/q"):
             return True
         if cmd == "/help":
-            s.say(HELP)
+            s.say(t("help"))
         elif cmd == "/new":
-            self.history.clear()
-            s.say("새 작업을 시작합니다. 앞의 대화는 맥락에서 뺐습니다.")
+            self.memory.clear()
+            s.say(t("new.done"))
+        elif cmd in ("/context", "/ctx"):
+            for line in self.context_lines():
+                s.say(line)
+        elif cmd == "/lang":
+            self.set_language(words[1].lower() if len(words) > 1 else "")
         elif cmd == "/log":
             records = self.policy_log.recent(10)
             if not records:
-                s.say("아직 정책 판정 기록이 없습니다. 도구는 M2부터 생깁니다.")
+                s.say(t("log.empty"))
             for r in records:
                 when = datetime.fromtimestamp(r.get("ts", 0)).strftime("%m-%d %H:%M")
-                s.say(f"{when}  {r.get('tool')}  {r.get('verdict')}  {r.get('rule')}  ({r.get('decided_by')})")
+                rule = i18n.rule_text(str(r.get("rule", "")))
+                who = i18n.who_text(str(r.get("decided_by", "")))
+                s.say(f"{when}  {r.get('tool')}  {r.get('verdict')}  {rule}  ({who})")
+        elif cmd == "/undo":
+            self.undo()
         elif cmd in LATER:
-            s.say(f"{cmd}는 {LATER[cmd]}에서 만듭니다.")
+            s.say(t("command.later", cmd=cmd, stage=LATER[cmd]))
         else:
-            s.say(f"모르는 명령입니다: {cmd}. /help를 보세요.")
+            s.say(t("command.unknown", cmd=cmd))
         return False
+
+    def set_language(self, lang: str) -> None:
+        """/lang: 이번 세션의 화면 언어만 바꾼다 (설정 파일은 연구원님이 직접 고침)."""
+        if lang in i18n.LANGS:
+            i18n.set_language(lang)
+            self.screen.say(t("lang.now", name=i18n.LANG_NAMES[lang]))
+        else:
+            self.screen.say(t("lang.usage", name=i18n.LANG_NAMES[i18n.get_language()]))
+
+    def context_lines(self) -> list[str]:
+        """/context: 다음 작업에 무엇을 어느 단계로 넣을지."""
+        if not self.memory.turns:
+            return [t("context.empty")]
+        budget = self.history_budget()
+        rows = self.memory.preview(budget)
+        counts = Counter(level for _, level, _ in rows)
+        summary = ", ".join(
+            t("context.count", level=t(f"level.{lv}"), count=counts[lv]) for lv in LEVELS if counts[lv]
+        )
+        used = sum(n for _, level, n in rows if level != DROPPED)
+        lines = [t("context.head", count=len(rows), summary=summary) + t("context.size", used=used, budget=budget)]
+        for i, (turn, level, _) in enumerate(rows, 1):
+            req = turn.request.replace("\n", " ")
+            lines.append(f"  {i}. [{t(f'level.{level}')}] {req[:50] + '...' if len(req) > 50 else req}")
+        return lines
+
+    def last_checkpoint(self):
+        """/undo로 되돌릴 마지막 파일 수정 (없으면 None)."""
+        cps = self.hctx.checkpoints
+        return cps.last() if cps else None
+
+    def undo_text(self, cp) -> str:
+        when = datetime.fromtimestamp(cp.ts).strftime("%m-%d %H:%M")
+        return t("undo.confirm", path=cp.original, when=when)
+
+    def restore(self, cp) -> Path:
+        """연구원님이 고른 되돌리기. 기록을 남긴다."""
+        path = self.hctx.checkpoints.restore(cp)  # type: ignore[union-attr]
+        self.policy_log.write("undo", {"path": str(path)}, "allow", "명령:/undo", "연구원님", cp.task)
+        return path
+
+    def undo(self) -> None:
+        s = self.screen
+        cp = self.last_checkpoint()
+        if cp is None:
+            s.say(t("undo.none"))
+            return
+        s.say(s.cobalt(t("undo.title")) + " " + self.undo_text(cp))
+        s.say(t("undo.options"))
+        while True:
+            try:
+                choice = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                s.say()
+                choice = "3"
+            if choice == "1":
+                s.say(t("undo.done", path=self.restore(cp)))
+                return
+            if choice == "3":
+                s.say(t("undo.kept"))
+                return
+            s.say(s.dim(t("choose.13")))
+
+    # ------------------------------------------------------------------
+    def run_direct(self, command: str) -> None:
+        """'!명령': 연구원님이 직접 실행. 내 터미널에서 치는 것과 같아서 승인 없이 돌린다.
+
+        결과는 화면에 보여 주고 대화 기억에 남긴다 ("이 결과 설명해줘"가 되도록). 기록은 남긴다.
+        """
+        command = command.strip()
+        if not command:
+            self.screen.say(t("direct.empty"))
+            return
+        cd = CD.match(command)
+        if cd:
+            self.change_dir(cd.group(1))
+            return
+        self.show_direct(self.execute_direct(command))
+
+    def execute_direct(self, command: str) -> "Direct":
+        """!명령을 실행하고 기록·기억에 남긴다. 화면에는 쓰지 않는다 (줄 화면과 TUI가 따로 보여 줌)."""
+        cwd = self.places.cwd or self.places.home
+        task_id = self.task_log.new_task("!" + command)
+        try:
+            res = shell.run_command(command, cwd, DIRECT_TIMEOUT_S, self.os)
+        except KeyboardInterrupt:
+            self.task_log.finish(task_id, "stopped")
+            return Direct(command, cwd, interrupted=True)
+        except ToolError as e:
+            self.task_log.finish(task_id, "stopped")
+            return Direct(command, cwd, error=localized(e))
+        self.policy_log.write("shell.run", {"command": command, "cwd": cwd}, "allow", "명령:!", "연구원님:직접", task_id)
+        text = shell.format_result(command, cwd, res, shell.shell_label(self.os), DIRECT_TIMEOUT_S)
+        observation = clip_output(text, self.cfg.home / "logs" / "outputs", task_id)
+        self.task_log.event(task_id, Event(ev.OBSERVATION, {"tool": "shell.run", "text": observation[:500]}))
+        self.task_log.finish(task_id, "done")
+        self.memory.add_direct(command, observation)
+        return Direct(command, cwd, res)
+
+    def show_direct(self, d: "Direct") -> None:
+        s = self.screen
+        if d.interrupted:
+            s.say()
+            s.say(t("direct.interrupted"))
+            return
+        if d.error:
+            s.say(t("direct.failed", detail=d.error))
+            return
+        res = d.result
+        assert res is not None
+        if res.timed_out:
+            s.say(s.dim(t("direct.timeout", command=d.command, seconds=DIRECT_TIMEOUT_S, cwd=d.cwd)))
+        else:
+            s.say(s.dim(t("direct.header", command=d.command, code=res.code, seconds=res.seconds, cwd=d.cwd)))
+        out = res.out.rstrip().splitlines()
+        for line in out[:DIRECT_LINES_SHOWN]:
+            s.say(line)
+        if len(out) > DIRECT_LINES_SHOWN:
+            s.say(s.dim(t("direct.more", count=len(out) - DIRECT_LINES_SHOWN)))
+        if res.err.strip():
+            s.say(s.dim(t("direct.stderr")))
+            for line in res.err.rstrip().splitlines()[:DIRECT_LINES_SHOWN]:
+                s.say(line)
+        if not res.out.strip() and not res.err.strip():
+            s.say(s.dim(t("direct.no_output")))
+
+    def change_dir(self, target: str | None) -> None:
+        """'!cd 폴더': 이 세션의 작업 폴더를 바꾼다 (!명령과 GLaDOS의 명령, 상대 경로가 모두 따름)."""
+        s = self.screen
+        if target and target.strip():
+            path = normalize(target.strip().strip('"').strip("'"), self.places)
+            if not os.path.isdir(path):
+                s.say(t("cd.missing", path=path))
+                return
+            self.set_cwd(path)
+        s.say(t("cd.now", path=self.places.cwd))
+        if self.cwd_is_safety():
+            s.say(s.dim(t("cwd.safety_note")))
 
     def repl(self, first_run: bool = False) -> int:
         s = self.screen
         s.say(s.dim(self.header()))
-        if first_run:
-            s.say(f"처음 뵙겠습니다. 설정 파일을 {self.cfg.home}에 만들었습니다. 무엇을 실험할까요?")
-        else:
-            s.say("다시 오셨군요. 무엇을 실험할까요?")
+        s.say(t("greet.first", home=self.cfg.home) if first_run else t("greet.again"))
+        if self.cwd_is_safety():
+            s.say(s.dim(t("cwd.safety_note")))
         while True:
             try:
                 line = input("> ")
@@ -244,12 +514,26 @@ class App:
                 if self.command(text):
                     break
                 continue
+            if text.startswith("!"):
+                self.run_direct(text[1:])
+                continue
             self.ask_task(text)
-        s.say(s.dim("기록은 남겨 두었습니다."))
+        s.say(s.dim(t("bye")))
         return 0
 
     def close(self) -> None:
         self.task_log.close()
+
+
+def wants_tui(choice: str, cfg_screen: str) -> bool:
+    """TUI로 열지. --plain/--tui가 설정보다 먼저. 터미널이 아니면(파이프, 시험) 줄 화면."""
+    kind = choice or cfg_screen
+    if kind != "tui":
+        return False
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -259,29 +543,39 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, ValueError):
         pass
 
+    home = glados_home()
+    i18n.set_language(peek_language(home))     # 설정을 다 읽기 전 안내도 그 언어로
+
     if args[:1] in (["-h"], ["--help"]):
-        print(USAGE)
+        print(t("usage"))
         return 0
     if args[:1] == ["--version"]:
         print(f"GLaDOS {__version__}")
         return 0
+    choice = ""
+    if args[:1] in (["--plain"], ["--tui"]):
+        choice = args.pop(0)[2:]
 
     screen = Screen(osinfo.enable_ansi())
     if osinfo.is_admin():
-        screen.say("관리자 권한으로 실행되어 멈췄습니다. GLaDOS는 일반 권한으로 실행해야 합니다. 관리자가 아닌 창에서 다시 실행하세요.")
+        screen.say(t("admin.refused"))
         return 2
 
-    home = glados_home()
     try:
         created = ensure_home(home)
         cfg = load_config(home)
     except (ConfigError, OSError) as e:
-        screen.say(f"설정을 읽을 수 없습니다. {e}")
+        screen.say(t("config.error", detail=localized(e)))
         return 1
 
-    if not osinfo.utf8_mode_on():
-        screen.say(screen.dim("참고: PYTHONUTF8이 꺼져 있습니다. 'setx PYTHONUTF8 1' 후 새 창에서 실행하면 한글 처리가 더 안전합니다."))
+    notes = [] if osinfo.utf8_mode_on() else [t("utf8.hint")]
+    if not args and wants_tui(choice, cfg.screen):
+        from glados.tui import run_tui           # textual은 TUI를 열 때만 불러온다
 
+        return run_tui(cfg, first_run=bool(created), notes=notes)
+
+    for note in notes:
+        screen.say(screen.dim(note))
     app = App(cfg, screen)
     try:
         if not app.check_model():

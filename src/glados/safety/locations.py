@@ -15,10 +15,12 @@ import ntpath
 import os
 import posixpath
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 
 from glados import osinfo
+from glados.i18n import t
 
 # 홈 아래의 키·비밀번호 폴더와 파일
 SECRET_HOME = (
@@ -116,7 +118,9 @@ class Location:
     path: str            # 정규화한 경로 (그 OS 표기)
     protected: bool      # 보호 위치
     safety: bool         # GLaDOS 안전장치
-    why: str             # 걸린 규칙 설명 (없으면 "")
+    why: str             # 걸린 규칙 설명 (없으면 ""). 기록·모델용 한국어
+    why_key: str = ""    # 화면 언어로 바꿀 때 쓰는 키 (i18n "loc.*")
+    why_arg: str = ""    # 키에 넣을 값 (예: .ssh)
 
 
 def _mod(os_name: str):
@@ -178,8 +182,14 @@ def _resolve_links(path: str, places: Places) -> str:
     return path
 
 
+@lru_cache(maxsize=8192)
+def _root_key(root: str, places: Places) -> str:
+    """기준 위치는 여러 번 비교하므로 풀어 둔 값을 기억한다 (파일 찾기에서 수천 번 쓰임)."""
+    return fold(places.os, normalize(root, places))
+
+
 def _under(path_f: str, root: str, places: Places) -> bool:
-    root_f = fold(places.os, normalize(root, places))
+    root_f = _root_key(root, places)
     sep = _sep(places.os)
     return path_f == root_f or path_f.startswith(root_f.rstrip(sep) + sep)
 
@@ -205,59 +215,92 @@ def classify(raw: str, places: Places) -> Location:
     name = parts[-1] if parts else ""
     home = places.home
 
-    safety_why = ""
+    safety: tuple[str, str] | None = None            # (키, 값)
     if _under(pf, places.glados_home, places):
-        safety_why = "GLaDOS 설정·기록 폴더"
+        safety = ("loc.glados_home", "")
     elif any(_under(pf, s, places) for s in places.source_dirs):
-        safety_why = "GLaDOS 소스 폴더"
+        safety = ("loc.glados_source", "")
     elif ".glados" in parts:
-        safety_why = "저장소의 GLaDOS 정책 폴더(.glados)"
+        safety = ("loc.repo_policy", "")
 
-    protected_why = ""
+    protected: tuple[str, str] | None = None
     for rel in SECRET_HOME:
         if _under(pf, m.join(home, rel), places):
-            protected_why = f"키·비밀번호 ({rel})"
+            protected = ("loc.keys", rel)
             break
-    if not protected_why:
+    if not protected:
         for pattern in SECRET_NAMES:
             if fnmatch.fnmatchcase(name, fold(places.os, pattern)):
-                protected_why = f"키·비밀번호 파일 ({pattern})"
+                protected = ("loc.key_file", pattern)
                 break
-    if not protected_why:
+    if not protected:
         for rel in SHELL_HOME:
             if _under(pf, m.join(home, rel), places):
-                protected_why = f"셸 설정 ({rel})"
+                protected = ("loc.shell_config", rel)
                 break
-    if not protected_why:
+    if not protected:
         for rel in OS_PROTECTED[places.os]["home"]:
             if _under(pf, m.join(home, rel), places):
-                protected_why = f"시스템·자동 실행 ({rel})"
+                protected = ("loc.autostart", rel)
                 break
-    if not protected_why:
+    if not protected:
         home_f = fold(places.os, normalize(home, places))
         parent = fold(places.os, m.dirname(path))
         if parent == home_f:
             for pattern in OS_PROTECTED[places.os]["home_names"]:
                 if fnmatch.fnmatchcase(name, pattern):
-                    protected_why = f"시스템 파일 ({pattern})"
+                    protected = ("loc.system_file", pattern)
                     break
-    if not protected_why:
+    if not protected:
         for root in _os_abs_roots(places):
             if _under(pf, root, places):
-                protected_why = f"시스템 폴더 ({root})"
+                protected = ("loc.system_dir", root)
                 break
-    if not protected_why:
+    if not protected:
         for extra in places.extra_protected:
             if _under(pf, extra, places):
-                protected_why = f"추가 보호 위치 ({extra})"
+                protected = ("loc.extra", extra)
                 break
 
+    key, arg = safety or protected or ("", "")
     return Location(
         path=path,
-        protected=bool(protected_why),
-        safety=bool(safety_why),
-        why=safety_why or protected_why,
+        protected=protected is not None,
+        safety=safety is not None,
+        why=t(key, "ko", arg=arg) if key else "",
+        why_key=key,
+        why_arg=arg,
     )
+
+
+PATH_TOKEN = re.compile(r'"([^"]+)"|\'([^\']+)\'|(\S+)')
+FILE_LIKE = re.compile(r"\.[A-Za-z0-9_-]{1,10}$")
+
+
+def command_paths(command: str) -> list[str]:
+    """명령 글에서 경로나 파일 이름처럼 보이는 낱말 (따옴표 안 포함, --opt=값의 값 포함).
+
+    셸 문법을 다 풀 수는 없어서 넉넉하게 고른다. 보호 위치·안전장치 판정의 1차 방어용.
+    """
+    out: list[str] = []
+    for m in PATH_TOKEN.finditer(command):
+        tok = next(g for g in m.groups() if g is not None).strip().rstrip(";,)")
+        if tok.startswith("-"):
+            if "=" not in tok:
+                continue
+            tok = tok.split("=", 1)[1]
+        if not tok or tok in (".", ".."):
+            continue
+        if (tok[0] in "~./\\" or "/" in tok or "\\" in tok or re.match(r"^[A-Za-z]:", tok)
+                or tok.startswith(("$HOME", "$env:", "%")) or FILE_LIKE.search(tok)):
+            out.append(tok)
+    return out
+
+
+def command_locations(command: str, places: Places, cwd: str | None = None) -> list[Location]:
+    """명령 속 경로들의 판정 (상대 경로는 명령을 실행할 폴더 기준)."""
+    p = replace(places, cwd=cwd) if cwd else places
+    return [classify(tok, p) for tok in command_paths(command)]
 
 
 def mentions_safety(command: str, places: Places) -> str:

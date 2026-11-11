@@ -7,5 +7,5 @@
 from __future__ import annotations
 
 
-def tools() -> list:
+def tools(hctx) -> list:
     return []

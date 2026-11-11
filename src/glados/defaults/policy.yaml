@@ -9,6 +9,10 @@ fs.search:
   "*": allow
   "@protected": ask
 
+fs.inspect:              # 파일마다 첫머리를 읽고 모델이 질문에 답함 (읽기만)
+  "*": allow
+  "@protected": ask
+
 fs.read:
   "*": allow
   "@protected": ask
@@ -23,13 +27,61 @@ fs.edit:                 # 원본 수정은 승인 + 체크포인트
 fs.trash:                # 삭제는 휴지통으로만
   "*": ask
 
-shell.run:
-  "*": ask
+shell.run:               # 허용 목록 밖은 승인. 코드 규칙: 잇거나 돌리면(; && | >) 승인, 보호 위치는 매번 승인,
+  "*": ask               #   GLaDOS 안전장치 폴더 안에서는 아래 읽기 명령만
+  # 상태 보기 (읽기만. 파일 내용을 쏟는 cat·type·rg는 넣지 않음: 파일은 fs.read로 읽는다)
+  "pwd": allow
+  "Get-Location": allow
+  "ls": allow
+  "ls *": allow
+  "dir": allow
+  "dir *": allow
+  "Get-ChildItem": allow
+  "Get-ChildItem *": allow
+  "whoami": allow
+  "hostname": allow
+  "date": allow
+  "Get-Date": allow
+  "uptime": allow
+  "df": allow
+  "df *": allow
+  "free": allow
+  "free *": allow
+  "ps": allow
+  "ps *": allow
+  "tasklist": allow
+  "Get-Process": allow
+  "Get-Process *": allow
+  "systeminfo": allow
+  "ipconfig": allow
+  "ipconfig /all": allow
+  "nvidia-smi": allow
+  "nvidia-smi *": allow
+  "which *": allow
+  "where.exe *": allow
+  "Get-Command *": allow
+  # 버전
+  "python --version": allow
+  "python3 --version": allow
+  "py --version": allow
+  "uv --version": allow
+  "node --version": allow
+  "git --version": allow
+  "ollama --version": allow
+  # git 읽기
   "git status*": allow
   "git log*": allow
   "git diff*": allow
-  "rg *": allow
-  "nvidia-smi*": allow
+  "git show*": allow
+  "git branch": allow
+  "git branch -a": allow
+  "git branch -v": allow
+  "git branch -vv": allow
+  "git remote -v": allow
+  # 목록
+  "pip list*": allow
+  "pip show *": allow
+  "uv pip list*": allow
   "ollama list*": allow
   "ollama ps*": allow
 
