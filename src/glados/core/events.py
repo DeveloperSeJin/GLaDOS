@@ -16,6 +16,8 @@ OBSERVATION = "observation"  # 도구 결과 요약 {tool, text}
 ANSWER = "answer"          # 최종 답 {fact, wit, sources}
 STOP = "stop"              # 끝나지 못하고 멈춤 {reason, message, detail, answered}
 GUARD = "guard"            # 안전망이 모델을 되돌림 {step, message}
+EGRESS = "egress"          # 이 컴퓨터 밖으로 보냄 (M3 웹 손) {tool, host, what, via, sent, searches}
+                           #   sent·searches: 이 세션의 외부 전송·웹 검색 합계 (보낸 직후)
 
 
 @dataclass

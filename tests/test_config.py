@@ -85,3 +85,32 @@ def test_servers_without_alias_are_skipped(tmp_path):
     (tmp_path / "servers.toml").write_text('[[server]]\nalias = "server-a"\ngpus = 4\n', encoding="utf-8")
     servers = load_config(tmp_path).servers
     assert len(servers) == 1 and servers[0].alias == "server-a" and servers[0].gpus == 4
+
+
+def test_web_settings(tmp_path):
+    ensure_home(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.web.search == "" and cfg.web.results == 5 and cfg.web.searxng_url == "http://localhost:8888"
+    assert cfg.private_words() == ("saul_park",)                      # [user] name도 묻는 이름
+    (tmp_path / "glados.toml").write_text(
+        '[web]\nsearch = "Tavily"\nresults = 8\nsearxng_url = "http://nas:8888/"\n'
+        '[privacy]\nnames = ["홍길동", "Gildong Hong"]\n[user]\nname = "sp"\n', encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.web.search == "tavily" and cfg.web.results == 8 and cfg.web.searxng_url == "http://nas:8888"
+    assert cfg.web.key_env == "TAVILY_API_KEY" and cfg.private_words() == ("홍길동", "Gildong Hong")   # 두 글자 이름은 뺌
+
+
+def test_old_settings_file_has_no_web_section(tmp_path):
+    (tmp_path / "glados.toml").write_text('[model]\nmode = "low"\n', encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.web.search == "" and cfg.private_names == []
+
+
+@pytest.mark.parametrize("body, key", [('[web]\nsearch = "google"\n', "config.web_search"),
+                                       ('[web]\nresults = 0\n', "config.web_results"),
+                                       ('[web]\nresults = "many"\n', "config.web_results")])
+def test_bad_web_settings(tmp_path, body, key):
+    (tmp_path / "glados.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(ConfigError) as e:
+        load_config(tmp_path)
+    assert e.value.key == key

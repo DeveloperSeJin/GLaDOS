@@ -75,6 +75,7 @@ If the content was clipped or that part was not read, read it again with fs.read
 - If nothing is found, try one or two different keywords. If there is still nothing, say it was not found. Never repeat the same search.
 - For "last year" or "this year", compute the year from the "Now" date below and put it in year.
 - Never modify original documents. Create a new file (.md) with fs.write_new only when asked to save.
+- If a file cannot be saved or a command is blocked, still give the content (for example the code) in your answer.
 - Use fs.edit only for text files, and copy old exactly as fs.read showed it.
 - For long files, continue with the fs.read offset. Do not claim you read everything if you did not.
 - Put the file paths you relied on in sources."""
@@ -88,6 +89,22 @@ running programs, system status).
 - Never run commands that wait for input (editors, interactive programs).
 - Answer only from the exit code and output in the result. If a command fails, read the error and try to fix it once or twice.
 - If a command is blocked or denied, do not repeat it. Report that it was blocked."""
+
+WEB_RULES = """\
+Web:
+- Search the web for anything that changes over time (news, prices, versions, recent papers). Do not answer it \
+from memory.
+- Call web.search and web.fetch directly; never ask for permission in your answer. The engine itself asks the \
+Researcher when a query or URL would carry personal details or text from their files.
+- Queries go over the internet: a few keywords in the language of the pages (English for research topics). Never \
+put personal details, file paths, or file text in them unless asked. For "latest" or "recent", set time_range.
+- Snippets are short. Read a page with web.fetch before stating its details; for a paper, read its own page \
+(arxiv.org/abs/...) or PDF.
+- In sources, cite only URLs from tool results, exactly as shown. If search is not set up or fails, say so.
+Researcher: LLM 평가 지표 최신 논문 3개 찾아서 요약해줘
+{"plan": ["Search for recent papers on LLM evaluation metrics.", "Read the top three with web.fetch.", \
+"Summarize each with its URL."], "thought": "Find recent papers first.", "action": {"tool": "web.search", \
+"args": {"query": "LLM evaluation metrics paper", "time_range": "year"}}, "done": false}"""
 
 REPLY_NOTE = {
     "en": "Language: the Researcher wrote in English. Write the answer in English.",
@@ -115,12 +132,14 @@ def build_system_prompt(
     if shell:
         env += f" Shell: {shell}."
     if cwd:
-        env += f" Working folder: {cwd}."
+        env += f" Working folder (relative paths and commands start here): {cwd}."
     layers = [persona(), ROLE, CONTRACT]
     if any(n.startswith("fs.") for n in tool_names):
         layers.append(FILE_RULES)
     if "shell.run" in tool_names:
         layers.append(SHELL_RULES.format(shell=shell or "the default shell"))
+    if any(n.startswith("web.") for n in tool_names):
+        layers.append(WEB_RULES)
     layers += [EXAMPLES, env]
     return "\n\n".join(layers)
 

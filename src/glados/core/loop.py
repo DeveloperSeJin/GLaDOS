@@ -8,7 +8,8 @@
 - 형식 오류는 2번까지 다시 요청 (llm.py), 그다음 멈춤
 - 같은 호출이 3번 이어지면 멈춤
 - 같은 도구 오류가 2번이면 멈추고 보고
-차단되거나 거절되면 그 사실을 관찰로 돌려주고 계획으로 돌아간다.
+- 정책에 3번 막히면 멈추고 보고 (막힌 일을 다른 방법으로 계속 두드리지 않게)
+차단되거나 거절되면 그 사실을 관찰로 돌려주고 계획으로 돌아간다. GLaDOS 안전장치에 막히면 어디서 하면 되는지도 알려 준다.
 
 영어로 통일 (M2.5)
 - 루프 안의 글(도구 결과, 안내, 멈춤 보고)은 모두 영어다. 모델은 영어로 생각하고 영어로 답한다
@@ -21,9 +22,11 @@
 - 이번 작업의 기록(transcript)을 돌려준다. 다음 작업이 이것을 기억한다
 
 작은 모델을 위한 안전망 (원칙 4: 모델은 틀린다고 가정한다)
-- 근거 확인: 파일을 다루는 이야기인데 이번 작업에서 도구를 한 번도 부르지 않고 답하면서, 출처가 앞에서
-  확인한 자료에 없으면 한 번 되돌린다 (앞 대화에서 읽은 파일을 출처로 대면 그대로 받는다.
+- 근거 확인: 파일이나 최신 정보를 다루는 이야기인데 이번 작업에서 도구를 한 번도 부르지 않고 답하면서, 출처가
+  앞에서 확인한 자료에 없으면 한 번 되돌린다 (앞 대화에서 읽은 파일을 출처로 대면 그대로 받는다.
   도구를 불렀다가 차단·거절된 뒤의 답은 그 사실을 말하는 것이라 되돌리지 않는다)
+- 출처 주소 확인 (M3): 답의 출처에 도구 결과(검색 결과, 읽은 페이지)에 나온 적 없는 주소가 있으면 한 번 되돌린다
+  (작은 모델은 그럴듯한 논문 주소를 지어낸다)
 - 영어 확인, 답 안전망(guards.py): 각각 한 번만 되돌린다
 - 같은 결과 안내: 같은 도구가 같은 결과를 또 내면 "지금까지 확인한 것으로 답하라"고 덧붙인다
 - 멈출 때 보고: 같은 호출·최대 횟수·도구 오류로 멈추면, 도구 없이 지금까지 확인한 것만으로 한 번 답하게 한다
@@ -45,7 +48,9 @@ from typing import Any, Callable, Iterable, Protocol
 
 from glados.config import LoopLimits
 from glados.core import events as ev
-from glados.core.context import CHECK_MARK, STOP_MARK, TASK_RESERVE, Conversation, fit, grounded, observation, size
+from glados.core.context import (
+    CHECK_MARK, STOP_MARK, TASK_RESERVE, Conversation, fit, grounded, local_texts, observation, size, unseen_urls,
+)
 from glados.core.events import Event
 from glados.core.guards import Guard
 from glados.core.llm import Cancelled, FormatError
@@ -67,6 +72,12 @@ NUDGE_EVIDENCE = (
     "If you already found or read the file earlier in this conversation, put its path in sources. "
     "If the question is not about files, give the same answer again."
 )
+NUDGE_WEB = " For current information from the web (news, prices, releases, recent papers), use web.search."
+NUDGE_SOURCES = (
+    f"{CHECK_MARK} These sources are not in any tool result: {{urls}}. Cite only URLs that a tool returned, "
+    "exactly as shown. If you have not found or read the page, search for it and read it first, "
+    "or remove it from sources."
+)
 NUDGE_ENGLISH = (
     f"{CHECK_MARK} Write answer.fact and answer.wit in English. "
     "The answer is translated for the Researcher automatically."
@@ -75,6 +86,9 @@ NUDGE_ACT = (
     f"{CHECK_MARK} Your plan is noted. Now take its first step: put a tool call in action and set done to false, "
     "or, if no tool is needed, set done to true and answer."
 )
+DENY_LIMIT = 3             # 한 작업에서 정책에 막혀도 되는 횟수 (넘으면 멈추고 보고)
+HINT_SAFETY = (" GLaDOS's own folders (its program, settings, and logs) can never be changed, and commands there "
+               "are read-only. Create files and run commands in another folder: {where}")
 HINT_REPEAT = "\n[note] Same result as before. Unless you change the conditions a lot, answer with what you have."
 FINAL_REPORT = (
     "{mark} {why} Do not call more tools. Answer only with what you have confirmed so far, "
@@ -159,6 +173,9 @@ def run_task(
         hist = list(history)
     schema = step_schema(tools.specs())
     first = step_schema(tools.specs(), plan=True) if tools.names() else schema   # 첫 걸음: 어떻게 할지 먼저
+    if ctx.texts is None:      # 웹으로 나갈 글 검사(정책)가 볼 글: 이 컴퓨터의 도구가 돌려준 글, 연구원님이 쓴 글
+        ctx.texts = lambda: local_texts([*hist, *task])
+    nudge_evidence = NUDGE_EVIDENCE + (NUDGE_WEB if "web.search" in tools.names() else "")
     emit(Event(ev.START, {"request": request}))
 
     def outgoing() -> list[Message]:
@@ -177,11 +194,13 @@ def run_task(
     trail: list[dict[str, Any]] = []
     last_obs: dict[str, str] = {}
     nudged = False
+    sources_nudged = False     # 출처 주소 확인은 한 번만
     english_nudged = False
     attempted = False          # 이번 작업에서 도구를 부르려 했는지 (차단·거절·오류도 포함)
     guards = list(answer_guards)
     fired: set[int] = set()    # 이미 되돌린 안전망
     planned_only = 0           # 계획만 쓰고 행동하지 않은 답 (한 번은 되돌려 준다)
+    denied = 0                 # 정책에 막힌 횟수
 
     def send_back(step_no: int, key: str, nudge: str) -> None:
         """답을 받지 않고 한 번 되돌린다. 그 답은 화면에도 기억에도 남기지 않는다."""
@@ -269,7 +288,12 @@ def run_task(
                 )
                 if needs_check:
                     nudged = True
-                    send_back(step_no, "guard.evidence", NUDGE_EVIDENCE)
+                    send_back(step_no, "guard.evidence", nudge_evidence)
+                    continue
+                unseen = [] if sources_nudged else unseen_urls(list(step.sources), [*hist, *task])
+                if unseen:
+                    sources_nudged = True
+                    send_back(step_no, "guard.sources", NUDGE_SOURCES.format(urls=", ".join(unseen[:5])))
                     continue
                 if not english_nudged and not in_language(said, "en"):
                     english_nudged = True
@@ -312,6 +336,12 @@ def run_task(
 
             if not allowed:
                 result = note
+                if decision.verdict == "deny":
+                    denied += 1
+                    if denied >= DENY_LIMIT:
+                        emit(Event(ev.OBSERVATION, {"tool": call.tool, "text": result[:500]}))
+                        record(observation(call.tool, result))
+                        return stop("denied", step_no, report=True, count=denied)
             else:
                 timeout = limits.remote_timeout_s if call.tool.startswith("remote.") else limits.local_timeout_s
                 tool = tools.get(call.tool)
@@ -360,7 +390,10 @@ def _decide(call: ToolCall, d: Decision, ctx: PolicyContext, approve: ApproveFn)
     if d.verdict == "allow":
         return True, "정책", ""
     if d.verdict == "deny":
-        return False, "정책", f"Blocked: {reason}. Find another way, or report that it cannot be done."
+        hint = ""
+        if d.rule.startswith("코드:안전장치"):       # GLaDOS 자기 폴더: 어디서 하면 되는지 알려 준다
+            hint = HINT_SAFETY.format(where=ctx.workspace or ctx.places.home)
+        return False, "정책", f"Blocked: {reason}.{hint} Find another way, or report that it cannot be done."
     if d.verdict == "wait":
         return False, "정책", f"Waiting: {reason}"
     choice = approve(call, d)

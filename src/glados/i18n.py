@@ -48,6 +48,8 @@ def localized(obj: Any, fallback: str = "", lang: str | None = None) -> str:
     params = dict(getattr(obj, "params", ()) or ())
     if "why_key" in params:                                   # 보호 위치 설명은 그 자체가 키
         params["why"] = t(params.pop("why_key"), lang, arg=params.pop("why_arg", ""))
+    if "what_keys" in params:                                 # 개인 정보 종류: 키 여러 개 (privacy.*)
+        params["what"] = ", ".join(t(k, lang) for k in str(params.pop("what_keys")).split(",") if k)
     return t(key, lang, **params)
 
 
@@ -69,6 +71,7 @@ _RULE_EN = {
     "관리자권한": "admin", "미등록도구": "unregistered", "읽기전용단계": "readonly_stage", "음성": "voice",
     "안전장치": "safety", "관리자표시": "admin_flag", "공유서버": "shared_server",
     "안전장치폴더": "safety_folder", "명령잇기": "chained", "보호위치명령": "protected_command",
+    "개인정보": "private_data", "내부주소": "local_address", "환경변수": "env_vars",
 }
 
 
@@ -136,6 +139,10 @@ TEXT: dict[str, dict[str, str]] = {
     "render.sources": {"ko": "출처: {sources}", "en": "Sources: {sources}"},
     "render.sources_more": {"ko": "출처: {sources} 외 {count}개", "en": "Sources: {sources} (+{count} more)"},
     "render.blocked": {"ko": "[차단] {tool}: {reason}", "en": "[Blocked] {tool}: {reason}"},
+    "render.egress_search": {"ko": "↗ 외부 전송 · {host} · 검색어 \"{what}\"", "en": "↗ sent outside · {host} · query \"{what}\""},
+    "render.egress_fetch": {"ko": "↗ 외부 전송 · {host} · 페이지 읽기 {what}", "en": "↗ sent outside · {host} · fetch {what}"},
+    "guard.sources": {"ko": "답의 출처 주소가 도구 결과에 없어 다시 확인하게 했습니다",
+                      "en": "The answer cited URLs that no tool returned, so it was sent back to check"},
     "guard.evidence": {"ko": "확인하지 않은 답이라 다시 확인하게 했습니다",
                        "en": "Unverified answer; asked the model to check first"},
     "guard.act": {"ko": "계획만 쓰고 시작하지 않아 첫 걸음을 떼게 했습니다",
@@ -155,6 +162,7 @@ TEXT: dict[str, dict[str, str]] = {
                        "en": "Stopped: reached the limit of {limit} steps for one task."},
     "stop.error_detail": {"ko": "  오류: {detail}", "en": "  Error: {detail}"},
     "stop.user": {"ko": "연구원님이 멈췄습니다.", "en": "Stopped by the Researcher."},
+    "stop.denied": {"ko": "정책에 {count}번 막혀 멈췄습니다.", "en": "Stopped: blocked by policy {count} times."},
 
     # 도구 오류 (모델에게는 영어로, 화면에는 설정 언어로)
     "tool.unavailable": {"ko": "이 컴퓨터에서는 {tool}을(를) 쓸 수 없습니다", "en": "{tool} is not available on this computer"},
@@ -181,6 +189,37 @@ TEXT: dict[str, dict[str, str]] = {
                       "en": "Cannot open the PDF (encrypted or damaged): {detail}"},
     "tool.docx_open": {"ko": "docx를 열 수 없습니다: {detail}", "en": "Cannot open the docx: {detail}"},
     "tool.no_file": {"ko": "파일이 없습니다: {path}", "en": "No such file: {path}"},
+    # 웹 손 (M3). 영어는 모델이 보는 글 (연구원님께 전할 것을 함께 적음)
+    "tool.web_off": {"ko": "웹 검색이 아직 설정되지 않았습니다. glados.toml의 [web] search에 검색 서비스를 적어 주세요 (README의 M3 설정)",
+                     "en": "Web search is not set up on this computer. Tell the Researcher to choose a search service "
+                           "under [web] search in glados.toml (see the README, M3 setup)"},
+    "tool.web_key": {"ko": "{name} 검색을 쓰려면 환경 변수 {var}에 API 키가 있어야 합니다 (넣은 뒤 GLaDOS를 다시 시작)",
+                     "en": "Web search uses {name}, but its API key is missing. Tell the Researcher to set the {var} "
+                           "environment variable and restart GLaDOS"},
+    "tool.web_query": {"ko": "검색어가 비어 있습니다", "en": "The query is empty"},
+    "tool.web_query_long": {"ko": "검색어가 너무 깁니다 ({count}자). 낱말 몇 개로 줄이세요",
+                            "en": "The query is too long ({count} chars). Use a few keywords"},
+    "tool.web_time_range": {"ko": "time_range는 day, week, month, year 가운데 하나입니다: {value}",
+                            "en": "time_range must be day, week, month, or year: {value}"},
+    "tool.web_auth": {"ko": "{name}가 API 키를 받지 않았습니다 (HTTP {status}). 환경 변수 {var}를 확인하세요",
+                      "en": "{name} rejected the API key (HTTP {status}). Tell the Researcher to check {var}"},
+    "tool.web_quota": {"ko": "{name} 검색 한도에 걸렸습니다 (HTTP {status}). 잠시 뒤에 다시 하거나 요금제를 확인하세요",
+                       "en": "{name} search limit reached (HTTP {status}). Try later; the Researcher may need to check the plan"},
+    "tool.web_http": {"ko": "{name} 검색이 실패했습니다 (HTTP {status})", "en": "{name} search failed (HTTP {status})"},
+    "tool.web_searxng_json": {"ko": "SearXNG가 요청을 거절했습니다 (403). settings.yml의 search: formats에 json이 없거나, "
+                                    "봇 차단(limiter)이 막았습니다",
+                              "en": "SearXNG refused the request (403): JSON output is off (the Researcher needs json in "
+                                    "search: formats in its settings.yml) or its bot limiter blocked the request"},
+    "tool.web_unreachable": {"ko": "{host}에 연결할 수 없습니다: {detail}", "en": "Cannot reach {host}: {detail}"},
+    "tool.web_timeout": {"ko": "{host}가 {seconds}초 안에 답하지 않았습니다", "en": "{host} did not answer within {seconds}s"},
+    "tool.web_bad_reply": {"ko": "{name}의 답을 읽을 수 없습니다", "en": "Could not read the reply from {name}"},
+    "tool.web_url": {"ko": "http나 https 주소만 읽을 수 있습니다: {url}", "en": "Only http and https URLs can be read: {url}"},
+    "tool.web_dns": {"ko": "주소를 찾을 수 없습니다: {host}", "en": "Cannot resolve the host name: {host}"},
+    "tool.web_local_dns": {"ko": "{host}는 이 컴퓨터나 내부 네트워크를 가리켜서 읽지 않았습니다",
+                           "en": "{host} points to this computer or the local network, so it was not read"},
+    "tool.web_redirect_local": {"ko": "이 주소가 내부 네트워크 주소로 넘겨서 따라가지 않았습니다: {url}",
+                                "en": "The page redirected to a local network address, which was not followed: {url}"},
+    "tool.web_redirects": {"ko": "다른 주소로 너무 많이 넘깁니다 ({count}번 넘음)", "en": "Too many redirects (more than {count})"},
     "tool.is_dir": {"ko": "폴더입니다. fs.search로 안의 파일을 찾으세요: {path}",
                     "en": "That is a folder. Use fs.search to find files inside it: {path}"},
     "tool.unsupported": {"ko": ".{ext} 파일은 아직 못 읽습니다 (v1)", "en": "Cannot read .{ext} files yet (v1)"},
@@ -231,19 +270,24 @@ TEXT: dict[str, dict[str, str]] = {
     "shell.cannot_run": {"ko": "명령을 실행할 수 없습니다: {detail}", "en": "Cannot start the command: {detail}"},
     "cd.now": {"ko": "작업 폴더: {path}", "en": "Working folder: {path}"},
     "cd.missing": {"ko": "폴더가 없습니다: {path}", "en": "No such folder: {path}"},
+    "cwd.moved": {"ko": "작업 폴더: {path} (GLaDOS 자기 폴더에서는 파일을 만들거나 명령을 돌릴 수 없어 옮겼습니다. 바꾸려면 !cd 폴더)",
+                  "en": "Working folder: {path} (moved out of GLaDOS's own folder, where files and commands are blocked. "
+                        "Change it with !cd folder)"},
     "cwd.safety_note": {"ko": "참고: 작업 폴더가 GLaDOS 자기 폴더라서, GLaDOS가 부르는 명령은 읽기 명령만 돕니다. !명령은 그대로 됩니다.",
                         "en": "Note: the working folder is GLaDOS's own folder, so commands GLaDOS runs are limited to read-only ones. !commands still work."},
 
     # 명령
     "help": {
         "ko": "명령어\n  /help     이 도움말\n  /new      새 대화 (앞의 대화를 잊음)\n  /context  지금 기억하고 있는 대화\n"
-              "  /log      최근 정책 판정 10개\n  /undo     마지막 파일 수정(fs.edit) 되돌리기\n"
+              "  /log      최근 정책 판정 10개\n  /sent     이 세션에서 밖으로 보낸 것 (웹 검색어, 읽은 주소)\n"
+              "  /undo     마지막 파일 수정(fs.edit) 되돌리기\n"
               "  /lang     화면 언어 바꾸기 (/lang ko, /lang en. 이번 세션만)\n  /quit     끝내기\n"
               "  !명령     명령을 바로 실행 (예: !git status, !dir, !cd 폴더). 승인 없이 돌고 결과는 대화 기억에 남습니다\n"
               "  /servers /runs /resume   다음 단계에서 만듭니다\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다.\n"
               "답은 물은 언어로 합니다 (한국어로 물으면 한국어, 영어로 물으면 영어).",
         "en": "Commands\n  /help     this help\n  /new      new conversation (forget the earlier one)\n"
               "  /context  what is in memory now\n  /log      last 10 policy decisions\n"
+              "  /sent     what was sent outside this session (web queries, fetched URLs)\n"
               "  /undo     undo the last file edit (fs.edit)\n  /lang     change the screen language (/lang ko, /lang en; this session only)\n"
               "  /quit     exit\n  !command  run a command directly (e.g. !git status, !dir, !cd folder); no approval, and the output stays in memory\n"
               "  /servers /runs /resume   coming in later stages\nCtrl+C during a task stops only that task.\n"
@@ -256,6 +300,17 @@ TEXT: dict[str, dict[str, str]] = {
     "lang.now": {"ko": "화면 언어: {name}. 이번 세션에만 적용됩니다. 계속 쓰려면 glados.toml의 [ui] language를 바꾸세요.",
                  "en": "Screen language: {name}. This session only; to keep it, set [ui] language in glados.toml."},
     "lang.usage": {"ko": "사용법: /lang ko 또는 /lang en (지금: {name})", "en": "Usage: /lang ko or /lang en (now: {name})"},
+    "sent.empty": {"ko": "이 세션에서 이 컴퓨터 밖으로 보낸 것이 없습니다.", "en": "Nothing has been sent outside this computer in this session."},
+    "sent.head": {"ko": "이 세션의 외부 전송 {sent}건 (웹 검색 {searches}건)", "en": "Sent outside in this session: {sent} (web searches: {searches})"},
+    "sent.search": {"ko": "검색", "en": "search"},
+    "sent.fetch": {"ko": "읽기", "en": "fetch "},
+    "sent.log": {"ko": "전체 기록: {path}", "en": "Full log: {path}"},
+    "web.on": {"ko": "웹 검색: {name} ({host}). 검색어와 읽은 주소는 외부 전송으로 세어 /sent에 보여 드립니다.",
+               "en": "Web search: {name} ({host}). Queries and fetched URLs count as sent outside; see /sent."},
+    "web.off": {"ko": "웹 검색이 꺼져 있습니다 (페이지 읽기는 됩니다). 켜는 법은 README의 M3 설정.",
+                "en": "Web search is off (reading pages still works). To turn it on, see the README, M3 setup."},
+    "web.nokey": {"ko": "웹 검색: {name}을(를) 골랐지만 환경 변수 {var}에 API 키가 없습니다.",
+                  "en": "Web search: {name} is chosen, but the {var} environment variable has no API key."},
 
     # /context
     "context.empty": {"ko": "기억하고 있는 대화가 없습니다.", "en": "No conversation in memory."},
@@ -311,6 +366,21 @@ TEXT: dict[str, dict[str, str]] = {
     "policy.ask_edit": {"ko": "원본 파일을 고칩니다 (고치기 전에 체크포인트를 남깁니다)",
                         "en": "Edits the original file (a checkpoint is saved first)"},
     "policy.ask_trash": {"ko": "파일을 휴지통으로 옮깁니다", "en": "Moves files to the trash"},
+    "policy.ask_private": {"ko": "개인 정보나 이 컴퓨터의 파일 내용이 밖으로 나갑니다 ({what}): {sample}",
+                           "en": "This would send personal details or file content outside ({what}): {sample}"},
+    "policy.ask_local_url": {"ko": "이 컴퓨터나 내부 네트워크의 주소입니다 ({host})",
+                             "en": "This address is on this computer or the local network ({host})"},
+    "policy.ask_env": {"ko": "환경 변수를 읽는 명령입니다 (API 키가 들어 있을 수 있음)",
+                       "en": "This command reads environment variables (they may hold API keys)"},
+    "privacy.email": {"ko": "이메일 주소", "en": "email address"},
+    "privacy.phone": {"ko": "전화번호", "en": "phone number"},
+    "privacy.rrn": {"ko": "주민등록번호", "en": "resident registration number"},
+    "privacy.card": {"ko": "카드 번호", "en": "card number"},
+    "privacy.secret": {"ko": "비밀 키·토큰", "en": "secret key or token"},
+    "privacy.path": {"ko": "파일 경로", "en": "file path"},
+    "privacy.name": {"ko": "등록한 이름", "en": "a name from [privacy] names"},
+    "privacy.local_text": {"ko": "이 대화에서 읽은 파일의 글", "en": "text from files read in this conversation"},
+    "privacy.file_name": {"ko": "이 컴퓨터의 파일 이름", "en": "a file name from this computer"},
     "policy.ask_shell": {"ko": "허용 목록 밖의 명령입니다", "en": "The command is not on the allowlist"},
     "policy.ask_default": {"ko": "승인이 필요한 작업입니다", "en": "This action needs approval"},
 
@@ -336,6 +406,10 @@ TEXT: dict[str, dict[str, str]] = {
                         "en": "ui.language in glados.toml must be \"ko\" or \"en\" (now: {value})"},
     "config.motion": {"ko": "glados.toml의 ui.motion은 true 또는 false여야 합니다 (지금: {value})",
                       "en": "ui.motion in glados.toml must be true or false (now: {value})"},
+    "config.web_search": {"ko": "glados.toml의 [web] search 값이 잘못되었습니다: {value} ({choices} 가운데 하나, 또는 빈칸)",
+                          "en": "Invalid [web] search in glados.toml: {value} (use one of {choices}, or leave it empty)"},
+    "config.web_results": {"ko": "glados.toml의 [web] results는 1~10이어야 합니다 (지금: {value})",
+                           "en": "[web] results in glados.toml must be 1-10 (now: {value})"},
     "config.screen": {"ko": "glados.toml의 ui.screen은 \"tui\" 또는 \"plain\"이어야 합니다 (지금: {value})",
                       "en": "ui.screen in glados.toml must be \"tui\" or \"plain\" (now: {value})"},
 
@@ -356,14 +430,16 @@ TEXT: dict[str, dict[str, str]] = {
     "tui.aside.machine": {"ko": "이 컴퓨터", "en": "THIS COMPUTER"},
     "tui.aside.scope": {"ko": "찾은 범위", "en": "SEARCHED"},
     "tui.aside.sources": {"ko": "출처", "en": "SOURCES"},
+    "tui.aside.egress": {"ko": "밖으로 보낸 것", "en": "SENT OUTSIDE"},
     "tui.stat.done": {"ko": "완료", "en": "done"},
     "tui.stat.stopped": {"ko": "멈춤", "en": "stopped"},
     "tui.stat.commands": {"ko": "명령", "en": "commands"},
-    "tui.local_note": {"ko": "웹 검색·외부 전송 0건. 모델도 이 컴퓨터에서 돕니다.",
-                       "en": "No web searches or external transfers. The model runs on this computer too."},
+    "tui.local_note": {"ko": "외부 전송 {sent}건 (웹 검색 {searches}건). 모델은 이 컴퓨터에서 돕니다.",
+                       "en": "Sent outside: {sent} (web searches: {searches}). The model runs on this computer."},
+    "tui.sent_note": {"ko": "외부 전송 {sent}건 (웹 검색 {searches}건).", "en": "Sent outside: {sent} (web searches: {searches})."},
     "tui.remote_note": {"ko": "모델은 다른 컴퓨터({host})에서 돕니다. 질문과 도구 결과가 그쪽으로 갑니다.",
                         "en": "The model runs on another computer ({host}). Questions and tool results go there."},
-    "tui.chip.local": {"ko": "외부 전송 0 · 웹 검색 0", "en": "external 0 · web search 0"},
+    "tui.chip.local": {"ko": "외부 전송 {sent} · 웹 검색 {searches}", "en": "sent outside {sent} · web searches {searches}"},
     "tui.chip.remote": {"ko": "모델 원격 · {host}", "en": "remote model · {host}"},
     "tui.machine": {"ko": "{model}{mode} · {os}", "en": "{model}{mode} · {os}"},
     "tui.folder": {"ko": "작업 폴더 {path}", "en": "working folder {path}"},
@@ -382,7 +458,8 @@ TEXT: dict[str, dict[str, str]] = {
                             "en": "A leading ! runs it now. I remember the output."},
     "tui.suggest.click": {"ko": "누르면 입력창에 넣습니다", "en": "Click to put it in the input"},
     "tui.chips.label": {"ko": "종류는 GLaDOS가 판단합니다", "en": "GLaDOS decides the kind"},
-    "tui.chips": {"ko": "파일 찾기|읽기·요약|새 파일|고치기|명령 실행", "en": "Find|Read·summarize|New file|Edit|Commands"},
+    "tui.chips": {"ko": "파일 찾기|읽기·요약|새 파일|고치기|명령 실행|웹 검색",
+                  "en": "Find|Read·summarize|New file|Edit|Commands|Web search"},
     "tui.k.task": {"ko": "작업", "en": "TASK"},
     "tui.k.command": {"ko": "명령", "en": "COMMAND"},
     "tui.k.slash": {"ko": "명령어", "en": "BUILT-IN"},

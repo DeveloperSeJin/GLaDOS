@@ -115,6 +115,44 @@ def _pdf(path: Path, deep: bool) -> Doc:
     )
 
 
+def pdf_bytes_text(data: bytes, max_pages: int, budget_s: float = 15.0) -> tuple[str, int, int, str, str]:
+    """웹에서 받은 PDF의 글 (web.fetch). (글, 전체 쪽 수, 읽은 쪽 수, 제목, 상태 ok|locked|error|no_text).
+    쪽마다 "[page N]" 표시를 붙인다 (요약할 때 어디서 나온 말인지 말할 수 있게)."""
+    import io
+
+    from pypdf import PdfReader
+
+    start = time.monotonic()
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            try:
+                opened = reader.decrypt("")
+            except Exception:
+                opened = 0
+            if not opened:
+                return "", 0, 0, "", "locked"
+        n = len(reader.pages)
+        title = str((reader.metadata or {}).get("/Title") or "").strip()
+    except Exception as e:
+        return "", 0, 0, "", f"error: {type(e).__name__}"[:200]
+    parts: list[str] = []
+    read = 0
+    for i in range(min(n, max_pages)):
+        if time.monotonic() - start > budget_s:
+            break
+        try:
+            text = reader.pages[i].extract_text() or ""
+        except Exception:
+            text = ""
+        parts.append(f"[page {i + 1}]\n{text.strip()}")
+        read += 1
+    body = "\n\n".join(parts)
+    if len(re.sub(r"\s|\[page \d+\]", "", body)) < 3:
+        return "", n, read, title, "no_text"
+    return body, n, read, title, "ok"
+
+
 def _docx(path: Path) -> Doc:
     from docx import Document
 

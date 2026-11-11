@@ -67,6 +67,10 @@ class HandContext:
     glossary: "Glossary | None" = None           # 이름 속 낱말을 영어로 (찾기에서 영어끼리 비교). 없으면 글자 그대로만
     llm: Any = None                              # 손이 모델에게 물을 때 (fs.inspect: 파일마다 질문). 없으면 그 도구는 오류
     model_name: str = ""                         # 답 캐시를 모델마다 따로 두려고
+    web: Any = None                              # config.WebConfig ([web]). 없으면 기본값 (검색 없음)
+    egress: Any = None                           # hands.web.Egress: 이 세션의 외부 전송 기록. 없으면 웹 손이 만든다
+    emit: Callable[[Any], None] | None = None    # 손이 알리는 이벤트 (외부 전송). 작업마다 앱이 넣는다
+    env: dict[str, str] | None = None            # API 키를 찾을 환경 변수 (없으면 os.environ. 시험에서 바꿈)
 
 
 class ToolRegistry:

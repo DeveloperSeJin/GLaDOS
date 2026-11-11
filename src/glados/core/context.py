@@ -21,6 +21,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 CHARS_PER_TOKEN = 1.3        # 토큰 하나를 몇 글자로 잡을지 (실측 1.5~3.5, 작게 잡아 안전하게)
 OUTPUT_RESERVE_TOKENS = 2048  # 모델의 답(JSON, 새 파일 내용 포함) 몫
@@ -90,7 +91,7 @@ def work_memo(trail: list[dict[str, Any]]) -> str:
         if not out:
             continue
         lines.append(f"- {t.get('tool')} {_brief_args(t.get('args', {}))} → {out[0][:200]}")
-        if t.get("tool") == "fs.search":
+        if t.get("tool") in ("fs.search", "web.search"):                # 찾은 파일·페이지 (경로, 주소)
             lines += [f"  {ln}" for ln in out[1:] if ln.startswith("- ")][:MEMO_HITS]
     if not lines:
         return ""
@@ -268,3 +269,63 @@ def grounded(sources: list[str], messages: list[Message]) -> bool:
         return False
     seen = evidence_text(messages)
     return all(n and n in seen for n in names)
+
+
+URL = re.compile(r"https?://[^\s<>\"'|)\]]+", re.IGNORECASE)
+
+
+def _url_key(url: str) -> str:
+    """주소 비교용: 앞의 http(s)://·www.·끝의 /·? 뒤·# 뒤를 뺀 호스트 + 경로 (소문자)."""
+    try:
+        parts = urlsplit(url.strip().rstrip(".,;"))
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").casefold().removeprefix("www.")
+    return host + parts.path.rstrip("/").casefold() if host else ""
+
+
+def unseen_urls(sources: list[str], messages: list[Message]) -> list[str]:
+    """출처 가운데 도구 결과(검색 결과, 읽은 페이지)에 나온 적 없는 주소. 작은 모델이 지어낸 주소를 잡는다.
+    같은 주소의 판 차이(arxiv …v2)와 http/https·www·끝의 / 차이는 같은 것으로 본다."""
+    cited = [s for s in sources if s.strip().lower().startswith(("http://", "https://"))]
+    if not cited:
+        return []
+    seen = {k for k in (_url_key(u) for u in URL.findall(evidence_text(messages))) if k}
+    out = []
+    for url in cited:
+        key = _url_key(url)
+        if not key:
+            out.append(url)
+            continue
+        ok = any(
+            key == s
+            or ("/" in s and key.startswith(s) and len(key) - len(s) <= 3)
+            or ("/" in key and s.startswith(key) and len(s) - len(key) <= 3)
+            for s in seen
+        )
+        if not ok:
+            out.append(url)
+    return out
+
+
+def local_texts(messages: list[Message]) -> tuple[str, str]:
+    """(이 컴퓨터의 도구가 돌려준 글, 연구원님이 쓴 글). 웹으로 나가는 글에 파일 내용이 들었는지 볼 때 쓴다
+    (safety/privacy.py). 웹 도구의 결과는 뺀다 (원래 밖에 있던 글)."""
+    local: list[str] = []
+    user: list[str] = []
+    web_obs = f"{OBS_PREFIX}: web."
+    for m in messages:
+        content = m["content"]
+        if is_observation(m):
+            if not content.startswith(web_obs):
+                local.append(content)
+        elif m["role"] == "user" and not is_engine_note(m):
+            user.append(content)
+        elif m["role"] == "assistant" and MEMO_MARK in content:
+            keep = True
+            for line in content.split(MEMO_MARK, 1)[1].splitlines():
+                if line.startswith("- "):
+                    keep = not line.startswith("- web.")
+                if keep:
+                    local.append(line)
+    return "\n".join(local), "\n".join(user)

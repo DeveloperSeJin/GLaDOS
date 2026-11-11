@@ -15,7 +15,7 @@ import ntpath
 import os
 import posixpath
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -297,10 +297,28 @@ def command_paths(command: str) -> list[str]:
     return out
 
 
+# 명령 맨 앞의 "cd 폴더;" / "Set-Location 폴더 &&": 뒤의 상대 경로는 그 폴더 기준이다
+CD_PREFIX = re.compile(r"""^\s*(?:cd|chdir|pushd|set-location|sl)\s+(?:-path\s+)?("[^"]+"|'[^']+'|[^;&|]+?)\s*(?:;|&&)\s*""",
+                       re.IGNORECASE)
+
+
+def command_cwd(command: str, places: Places, cwd: str | None = None) -> str | None:
+    """명령이 실제로 도는 폴더: 맨 앞에서 cd로 옮기면 그 폴더, 아니면 cwd."""
+    m = CD_PREFIX.match(command)
+    if not m:
+        return cwd
+    target = m.group(1).strip().strip("\"'")
+    return normalize(target, replace(places, cwd=cwd) if cwd else places)
+
+
 def command_locations(command: str, places: Places, cwd: str | None = None) -> list[Location]:
-    """명령 속 경로들의 판정 (상대 경로는 명령을 실행할 폴더 기준)."""
+    """명령 속 경로들의 판정 (상대 경로는 명령을 실행할 폴더 기준. 맨 앞의 cd 뒤로는 그 폴더 기준)."""
     p = replace(places, cwd=cwd) if cwd else places
-    return [classify(tok, p) for tok in command_paths(command)]
+    m = CD_PREFIX.match(command)
+    if not m:
+        return [classify(tok, p) for tok in command_paths(command)]
+    moved = replace(places, cwd=command_cwd(command, places, cwd))
+    return [classify(m.group(1).strip().strip("\"'"), p)] + [classify(tok, moved) for tok in command_paths(command[m.end():])]
 
 
 def mentions_safety(command: str, places: Places) -> str:

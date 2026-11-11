@@ -28,5 +28,18 @@ tool_error_limit = 2    # 같은 도구 오류 몇 번이면 보고할지
 local_timeout_s = 60
 remote_timeout_s = 300
 
+[web]
+# 웹 검색을 맡길 곳: "tavily" | "brave" | "searxng" | "ollama". 비우면 검색 없음 (페이지 읽기는 됨)
+# API 키는 이 파일에 적지 않고 환경 변수로: TAVILY_API_KEY, BRAVE_API_KEY, OLLAMA_API_KEY
+# 검색어와 읽은 주소는 외부 전송으로 세어 머리글 칩과 /sent에 보여 주고 logs/egress.jsonl에 남긴다
+search = ""
+searxng_url = "http://localhost:8888"   # search = "searxng"일 때 (settings.yml의 search: formats에 json을 켜야 함)
+results = 5                             # 검색 한 번에 받을 결과 수 (1~10)
+
+[privacy]
+# 웹으로 나가는 글(검색어, 주소)에 이 이름이 있으면 먼저 묻는다. 이메일·전화번호·파일 경로·키 모양,
+# 이 대화에서 읽은 파일의 글은 따로 적지 않아도 묻는다
+names = []              # 예: ["홍길동", "Gildong Hong"]
+
 [user]
 name = "saul_park"      # 공유 서버의 내 사용자 이름 (tmux 세션 이름에 씀)

@@ -368,3 +368,77 @@ def test_stop_does_not_wait_for_slow_tool():
                       ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
                       limits=LoopLimits(), system_prompt="test", cancelled=lambda: flag["stop"])
     assert result.reason == "user" and time.monotonic() - start < 1.5
+
+
+# ---------------------------------------------------------------------- 출처 주소 확인 (M3)
+def _search(text: str = 'Web search (Tavily, sent to api.tavily.com): "llm metrics" · 1 result\n'
+                        "- Real paper | https://arxiv.org/abs/2610.00001\n  2026-10-02 · snippet") -> Tool:
+    return Tool("web.search", "search", run=lambda a: text)
+
+
+def test_cited_urls_must_come_from_tool_results():
+    """작은 모델은 그럴듯한 논문 주소를 지어낸다: 도구 결과에 없는 주소를 출처로 대면 한 번 되돌린다."""
+    llm = FakeLLM([act("web.search", query="llm metrics"),
+                   answer("Two papers.", sources=["https://arxiv.org/abs/2610.00001", "https://arxiv.org/abs/2699.99999"]),
+                   answer("One paper.", sources=["https://www.arxiv.org/abs/2610.00001v2/"])])
+    result, events = run(llm, tools=ToolRegistry([_search()]))
+    assert result.status == "done" and result.answer.fact == "One paper."      # 판 표시·www·끝의 /는 같은 주소
+    assert [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.sources"]
+    nudge = llm.calls[2][0][-1]["content"]
+    assert "https://arxiv.org/abs/2699.99999" in nudge and "2610.00001" not in nudge
+    assert all("Two papers." not in m["content"] for m in result.transcript)   # 되돌린 답은 기억에 남지 않는다
+
+
+def test_url_check_sends_back_only_once():
+    llm = FakeLLM([act("web.search", query="llm metrics"),
+                   answer("A.", sources=["https://made.up/1"]), answer("B.", sources=["https://made.up/2"])])
+    result, events = run(llm, tools=ToolRegistry([_search()]))
+    assert result.answer.fact == "B." and result.sources == ["https://made.up/2"]
+    assert sum(e.kind == ev.GUARD for e in events) == 1
+
+
+def test_file_sources_are_not_checked_as_urls():
+    llm = FakeLLM([act("web.search", query="x"), answer("Done.", sources=["C:\\Users\\User\\a.pdf"])])
+    result, events = run(llm, tools=ToolRegistry([_search()]))
+    assert result.status == "done" and not any(e.kind == ev.GUARD for e in events)
+
+
+def test_evidence_nudge_points_to_web_search_when_it_exists():
+    from glados.core.guards import needs_evidence
+    from glados.core.loop import NUDGE_WEB
+
+    llm = FakeLLM([answer("The latest version is 9."), answer("I could not check it.")])
+    result, events = run(llm, tools=ToolRegistry([_search()]), evidence_check=needs_evidence,
+                         request="What is the latest version of Textual?")
+    assert llm.calls[1][0][-1]["content"] == NUDGE_EVIDENCE + NUDGE_WEB
+    llm = FakeLLM([answer("There are 2 files."), answer("I checked nothing.")])
+    run(llm, tools=ToolRegistry([reader()]), evidence_check=needs_evidence, request="How many files?")
+    assert llm.calls[1][0][-1]["content"] == NUDGE_EVIDENCE                    # 웹 도구가 없으면 웹 안내 없이
+
+
+# ---------------------------------------------------------------------- 막혔을 때 (2026-11-11 실사용)
+def test_safety_block_says_where_to_work_instead():
+    """GLaDOS 자기 폴더에 쓰려다 막히면 어디서 하면 되는지 알려 준다 (전에는 같은 폴더를 계속 두드렸다)."""
+    writer = Tool("fs.write_new", "write", run=lambda a: "Created")
+    llm = FakeLLM([act("fs.write_new", path="/home/sejin/.glados/hello.py", content="print(1)"), answer("Saved elsewhere.")])
+    ctx = make_ctx("linux", registered_tools=frozenset(["fs.write_new"]), workspace="/home/sejin/Documents/GLaDOS")
+    result, events = run(llm, tools=ToolRegistry([writer]), ctx=ctx)
+    note = llm.calls[1][0][-1]["content"]
+    assert note.startswith("[result: fs.write_new] Blocked: GLaDOS safety files cannot be changed")
+    assert "Create files and run commands in another folder: /home/sejin/Documents/GLaDOS" in note
+
+
+def test_three_blocks_stop_the_task_with_a_report():
+    from glados.safety.policy import Policy as P
+
+    reader_tool = reader()
+    llm = FakeLLM([act("fs.read", path="/a"), act("fs.read", path="/b"), act("fs.read", path="/c"),
+                   answer("Reading is blocked here.")])
+    tools = ToolRegistry([reader_tool])
+    events = []
+    result = run_task("read three files", llm=llm, policy=P(base_layers() + [("연구원님", {"fs.read": {"*": "deny"}})]),
+                      ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
+                      limits=LoopLimits(), system_prompt="test", emit=events.append)
+    assert result.status == "stopped" and result.reason == "denied" and result.answer.fact == "Reading is blocked here."
+    stop = [e for e in events if e.kind == ev.STOP][0]
+    assert stop.data["params"] == {"count": 3} and stop.data["answered"]

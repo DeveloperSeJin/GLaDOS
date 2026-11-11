@@ -27,6 +27,9 @@ DEFAULT_FILES: dict[str, str] = {
 }
 SUBDIRS = ("logs", "checkpoints")
 SCREENS = ("tui", "plain")      # [ui] screen: TUI(기본) 또는 줄 화면
+# [web] search: 웹 검색을 맡길 곳 (M3). 비우면 검색 없음 (페이지 읽기는 됨). API 키는 환경 변수로만
+SEARCH_BACKENDS = ("tavily", "brave", "searxng", "ollama")
+SEARCH_KEY_ENV = {"tavily": "TAVILY_API_KEY", "brave": "BRAVE_API_KEY", "ollama": "OLLAMA_API_KEY"}
 
 
 class ConfigError(KeyedError):
@@ -85,6 +88,20 @@ class LoopLimits:
 
 
 @dataclass
+class WebConfig:
+    """웹 손 (M3). 검색어와 읽는 주소는 이 컴퓨터 밖으로 나간다 (외부 전송으로 세고 보여 줌)."""
+
+    search: str = ""                              # tavily | brave | searxng | ollama | "" (검색 없음)
+    searxng_url: str = "http://localhost:8888"    # 직접 운영하는 SearXNG (settings.yml에서 json을 켜야 함)
+    results: int = 5                              # 검색 한 번에 받을 결과 수 (1~10)
+
+    @property
+    def key_env(self) -> str:
+        """API 키를 담을 환경 변수 이름 (SearXNG·검색 없음이면 "")."""
+        return SEARCH_KEY_ENV.get(self.search, "")
+
+
+@dataclass
 class Server:
     alias: str
     gpus: int = 0
@@ -100,12 +117,22 @@ class Config:
     user_name: str = ""
     search_default: list[str] = field(default_factory=list)
     extra_protected: list[str] = field(default_factory=list)
+    workspace: str = ""              # folders.toml workspace: 자기 폴더에서 열었을 때 옮길 작업 폴더 (비우면 문서\GLaDOS)
     servers: list[Server] = field(default_factory=list)
     # (층 이름, 규칙) 목록. 기본 → 연구원님 순서. 마지막에 맞는 규칙이 이긴다
     policy_layers: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     language: str = DEFAULT_LANG     # 화면 언어 "ko" | "en" (답은 물은 언어로)
     screen: str = "tui"              # 화면 종류 "tui" | "plain" (glados --plain/--tui가 먼저)
     motion: bool = True              # TUI의 움직이는 표시 (작업 중 로고의 점). 끄면 멈춘 그림만
+    web: WebConfig = field(default_factory=WebConfig)
+    private_names: list[str] = field(default_factory=list)   # [privacy] names: 밖으로 보내면 묻는 이름
+
+    def private_words(self) -> tuple[str, ...]:
+        """웹으로 나가는 글에서 찾을 이름: [privacy] names + [user] name (공유 서버 사용자 이름)."""
+        names = [n for n in self.private_names if n.strip()]
+        if len(self.user_name.strip()) >= 3:
+            names.append(self.user_name.strip())
+        return tuple(dict.fromkeys(names))
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -163,6 +190,24 @@ def load_config(home: Path) -> Config:
     loop_sec = main.get("loop", {})
     limits = LoopLimits(**{k: int(v) for k, v in loop_sec.items() if k in LoopLimits.__dataclass_fields__})
 
+    web_sec = main.get("web", {})                     # 예전 설정 파일에는 없다 → 검색 없음
+    search = str(web_sec.get("search", "")).strip().lower()
+    if search and search not in SEARCH_BACKENDS:
+        raise ConfigError("config.web_search", value=search, choices=", ".join(SEARCH_BACKENDS))
+    try:
+        results = int(web_sec.get("results", WebConfig.results))
+    except (TypeError, ValueError):
+        raise ConfigError("config.web_results", value=web_sec.get("results")) from None
+    if not 1 <= results <= 10:
+        raise ConfigError("config.web_results", value=results)
+    web = WebConfig(
+        search=search,
+        searxng_url=str(web_sec.get("searxng_url", WebConfig.searxng_url)).strip().rstrip("/"),
+        results=results,
+    )
+    names = main.get("privacy", {}).get("names", [])
+    private_names = [str(n) for n in names] if isinstance(names, list) else []
+
     server_list = [
         Server(
             alias=str(s.get("alias", "")),
@@ -188,11 +233,14 @@ def load_config(home: Path) -> Config:
         user_name=str(main.get("user", {}).get("name", "")),
         search_default=[str(p) for p in folders.get("search_default", [])],
         extra_protected=[str(p) for p in folders.get("extra_protected", [])],
+        workspace=str(folders.get("workspace", "") or "").strip(),
         servers=server_list,
         policy_layers=layers,
         language=language,
         screen=screen,
         motion=motion,
+        web=web,
+        private_names=private_names,
     )
 
 

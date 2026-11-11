@@ -85,10 +85,10 @@ shell.run:               # 허용 목록 밖은 승인. 코드 규칙: 잇거나
   "ollama list*": allow
   "ollama ps*": allow
 
-web.search:              # 외부 전송으로 세고 표시 (개인 정보·파일 내용 검사는 M3)
-  "*": allow
+web.search:              # 외부 전송으로 세고 표시. 코드 규칙: 검색어에 개인 정보·이 대화에서 읽은 파일의 글이면 매번 승인
+  "*": allow             #   (모든 검색을 묻게 하려면 ~/.glados/policy.yaml에 "*": ask)
 
-web.fetch:
+web.fetch:               # 외부 전송으로 세고 표시. 코드 규칙: 이 컴퓨터·내부 네트워크 주소, 주소에 개인 정보면 매번 승인
   "*": allow
 
 remote.gpu:

@@ -12,7 +12,11 @@
    - 셸 명령: 관리자 권한은 admin 표시로만 요청 -> 승인 (작업 동안 승인 불가)
    - 공유 서버 sudo -> 차단
 2. policy.yaml 층 (기본 -> 연구원님 -> 서버 -> 저장소). 마지막에 맞는 규칙이 이긴다. 아무것도 안 맞으면 차단
-3. "이 작업 동안" 승인을 받은 규칙이면 ask -> allow
+3. 코드 규칙으로 더 보는 도구 (층의 판정이 허용이어도 승인으로 올림, 매번 승인)
+   - shell.run: 잇거나 돌리는 명령, 보호 위치, 환경 변수 읽기(API 키가 있을 수 있음)
+   - web.search·web.fetch (M3): 밖으로 보낼 글에 개인 정보·이 컴퓨터의 파일 내용(safety/privacy.py),
+     읽을 주소가 이 컴퓨터나 내부 네트워크
+4. "이 작업 동안" 승인을 받은 규칙이면 ask -> allow
 """
 
 from __future__ import annotations
@@ -20,11 +24,12 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from glados.i18n import localized
+from glados.safety import privacy
 from glados.safety.locations import (
-    Location, Places, classify, command_locations, fold, mentions_safety, normalize,
+    Location, Places, classify, command_cwd, command_locations, fold, mentions_safety, normalize,
 )
 
 Verdict = Literal["allow", "ask", "deny", "wait"]
@@ -49,6 +54,17 @@ ADMIN_WORDS = re.compile(r"(^|[\s;&|(])(sudo|pkexec|doas|runas|gsudo)(\s|$)|-ver
 REMOTE_SUDO = re.compile(r"(^|[\s;&|(])sudo(\s|$)")
 # 명령을 잇거나(; && || |), 출력을 돌리거나(> <), 다른 명령을 끼워 넣는(` $( ) 표시. 허용 목록 명령이어도 승인
 COMPOUND = re.compile(r"[;&|`<>\r\n]|\$\(")
+# 환경 변수 값을 쏟는 명령 (웹 검색 API 키가 환경 변수에 있다). 경로로 쓰는 $env:USERPROFILE 같은 것은 괜찮다
+ENV_READ = re.compile(
+    r"(?i)(?<![\w$])env:"                                   # PowerShell 환경 변수 드라이브: dir env:, Get-Item env:X
+    r"|^\s*\$env:\w+\s*$"                                    # $env:X 만 (값을 그대로 출력)
+    r"|\b(?:echo|write-output|write-host|write)\b[^|;]*\$env:"   # 값을 출력
+    r"|\$\{?\w*(?:key|token|secret|passw)\w*"                # $TAVILY_API_KEY, ${GH_TOKEN} (bash·zsh)
+    r"|^\s*(?:printenv|env|set)(?:\s|$)|getenvironmentvariable|/proc/[\w/]*environ|os\.environ|getenv\b"
+    r"|^\s*ps\s+(?!-)\S*e"                                   # ps e, ps axe (BSD 모양: 환경 변수까지 보임)
+)
+# 밖으로 글을 보내는 도구와 그 글이 든 인자
+WEB_TOOLS: dict[str, str] = {"web.search": "query", "web.fetch": "url"}
 
 
 @dataclass(frozen=True)
@@ -85,6 +101,10 @@ class PolicyContext:
     source: str = "text"            # "text" | "voice"
     stage: str | None = None        # 실험 단계 이름 (예: "hypothesis", "design", "implement")
     grants: set[tuple[str, str]] = field(default_factory=set)  # (도구, 규칙) - "이 작업 동안" 승인
+    private_names: tuple[str, ...] = ()       # 밖으로 보내면 묻는 이름 ([privacy] names, [user] name)
+    # (이 컴퓨터의 도구가 돌려준 글, 연구원님이 쓴 글): 웹으로 나가는 글에 파일 내용이 들었는지 볼 때. 루프가 넣는다
+    texts: Callable[[], tuple[str, str]] | None = None
+    workspace: str = ""          # GLaDOS가 새 파일을 만들고 명령을 돌려도 되는 곳 (막혔을 때 모델에게 알려 줌)
 
 
 class Policy:
@@ -101,12 +121,14 @@ class Policy:
         decision = self._layers(call.tool, subject, location, ctx)
         if call.tool == "shell.run":
             decision = self._shell(call, ctx, decision)
+        if call.tool in WEB_TOOLS:
+            decision = self._web(call, ctx, decision)
 
         # 셸 명령의 관리자 권한은 정책 파일과 상관없이 항상 승인 (작업 동안 승인 불가)
         if call.tool == "shell.run" and call.args.get("admin") and decision.verdict != "deny":
             return _d("ask", "코드:관리자권한", "policy.admin_shell", grantable=False)
 
-        if decision.verdict == "ask" and (call.tool, decision.rule) in ctx.grants:
+        if decision.verdict == "ask" and decision.grantable and (call.tool, decision.rule) in ctx.grants:
             return Decision("allow", decision.rule, decision.reason + " (이 작업 동안 승인됨)",
                             key=decision.key, params=decision.params)
         return decision
@@ -156,17 +178,42 @@ class Policy:
             return decision
         command = str(call.args.get("command", ""))
         simple = not COMPOUND.search(command)
-        cwd = _shell_cwd(call, ctx)
+        start = _shell_cwd(call, ctx)
+        cwd = command_cwd(command, ctx.places, start) or start   # 맨 앞에서 cd로 옮기면 그 폴더에서 도는 것
         cwd_loc = classify(cwd, ctx.places)
         if cwd_loc.safety:
             if decision.verdict == "allow" and simple:
                 return decision
             return _d("deny", "코드:안전장치폴더", "policy.safety_cwd", grantable=False, **_why(cwd_loc))
-        touched = next((loc for loc in (cwd_loc, *command_locations(command, ctx.places, cwd)) if loc.protected), None)
+        touched = next((loc for loc in (cwd_loc, *command_locations(command, ctx.places, start)) if loc.protected), None)
         if touched is not None:
             return _d("ask", "코드:보호위치명령", "policy.ask_protected", grantable=False, **_why(touched))
+        if ENV_READ.search(command):
+            return _d("ask", "코드:환경변수", "policy.ask_env", grantable=False)
         if decision.verdict == "allow" and not simple:
             return _d("ask", "코드:명령잇기", "policy.ask_compound")
+        return decision
+
+    def _web(self, call: ToolCall, ctx: PolicyContext, decision: Decision) -> Decision:
+        """밖으로 나가는 글을 본다 (M3). 걸리면 매번 승인 ("이 작업 동안" 안 됨: 보낼 글이 매번 다르다).
+
+        - web.fetch의 주소가 이 컴퓨터나 내부 네트워크 (공유기 관리 화면, 다른 프로그램의 로컬 API 등)
+        - 보낼 글(검색어, 주소의 질의 부분)에 개인 정보나 이 대화에서 읽은 파일의 글
+        """
+        if decision.verdict == "deny":
+            return decision
+        text = str(call.args.get(WEB_TOOLS[call.tool], ""))
+        if call.tool == "web.fetch":
+            host = privacy.url_host(text)
+            if host and privacy.is_local_host(host):
+                return _d("ask", "코드:내부주소", "policy.ask_local_url", grantable=False, host=host)
+        local, user = ctx.texts() if ctx.texts is not None else ("", "")
+        scan = privacy.scan_url if call.tool == "web.fetch" else privacy.scan_text
+        found = scan(text, names=ctx.private_names, home=ctx.places.home, local=local, user=user)
+        if found:
+            return _d("ask", "코드:개인정보", "policy.ask_private", grantable=False,
+                      what_keys=",".join(f"privacy.{f.kind}" for f in found),
+                      sample=" · ".join(f.sample for f in found))
         return decision
 
     def _subject(self, call: ToolCall, ctx: PolicyContext) -> tuple[str, Location | None]:
@@ -177,7 +224,7 @@ class Policy:
                 return "", None
             # 여러 경로면 가장 엄한 것을 기준으로
             locs = [classify(p, ctx.places) for p in paths]
-            worst = next((l for l in locs if l.protected), locs[0])
+            worst = next((loc for loc in locs if loc.protected), locs[0])
             return worst.path, worst
         for key in ("command", "query", "url", "server", "text"):
             if key in call.args:

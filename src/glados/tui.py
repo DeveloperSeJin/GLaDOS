@@ -74,6 +74,7 @@ KEY_GUARD_S = 0.8         # 상자가 뜬 직후 이 시간 동안은 숫자 키
 FRAME_S = 0.125           # 머리글 심볼이 움직일 때 한 장면 (초)
 LIVE_EVERY = 2            # 몇 장면마다 흐른 시간·토큰을 다시 그릴지 (0.25초)
 LIVE_LINES = 3            # 작업 중 토큰 칸의 글 줄 수
+EGRESS_SHOWN = 6         # 오른쪽 맥락에 보여 줄 "밖으로 보낸 것" 수
 HIDE_CURSOR, SHOW_CURSOR = "\x1b[?25l", "\x1b[?25h"
 SCOPE = re.compile(r"\(scope: (.+)\)\s*$")
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
@@ -208,6 +209,7 @@ class TaskCard(Vertical):
         self.code: int | None = None
         self.sources: list[str] = []
         self.scope: list[str] = []
+        self.egress: list[tuple[str, str, str]] = []   # 이 작업이 밖으로 보낸 것 (도구, 받은 곳, 보낸 것)
         self.kicker = Static(classes="kicker")
         self.heading = Static(Text(title, style=f"bold {WHITE}"), classes="title")
         self.body = Lines(classes="body")
@@ -456,7 +458,9 @@ class HomeView(Vertical):
     def fit(self) -> None:
         """폭에 맞게 로고를 고른다: 심볼 20×10 + 5줄 글자 / 16×8 + 4줄 / 12×6 + 3줄 / 6×3 + 3줄 / 심볼만.
         넓은 화면일수록 점이 많아 곡선이 매끄럽다. 제안 카드는 넓으면 나란히, 좁으면 위아래로."""
-        width = self.content_size.width or 80
+        width = self.content_size.width
+        if width <= 0:                                   # 아직 배치 전: 고르지 않는다 (가짜 폭으로 고르면 깜박임)
+            return
         if width >= 98:
             key, cols, rows, mark_rows, full = "xl", 20, 10, 5, True
         elif width >= 80:
@@ -480,7 +484,10 @@ class HomeView(Vertical):
             self.mark.update(logo.wordmark(mark_rows))
 
     def on_resize(self) -> None:
+        # 창 크기가 바뀌면 양옆 패널 폭도 따라 바뀌어 잠깐 좁은 폭이 먼저 올 수 있다 → 지금 폭으로 고르고,
+        # 배치가 끝난 뒤 한 번 더 고른다 (같으면 아무것도 안 함)
         self.fit()
+        self.call_after_refresh(self.fit)
 
     def add_note(self, line: Text) -> None:
         self.notes.display = True
@@ -815,6 +822,8 @@ class GladosTUI(TextualApp):
                 yield Static(id="scope", classes="section")
                 yield Static(id="sources-title", classes="label")
                 yield Static(id="sources", classes="section")
+                yield Static(id="egress-title", classes="label")
+                yield Static(id="egress", classes="section")
                 yield Static(id="memory-title", classes="label")
                 yield Static(id="memory", classes="section")
         yield Static(id="keys")
@@ -823,7 +832,7 @@ class GladosTUI(TextualApp):
         self.register_theme(GLADOS_THEME)
         self.theme = "glados"
         e = self.engine
-        for note in self.notes + [t("tui.ime_hint")]:
+        for note in self.notes + [e.web_note(), t("tui.ime_hint")]:
             self.home.add_note(Text(note, style=FAINT))
         if e.cwd_is_safety():
             self.home.add_note(Text(t("cwd.safety_note"), style=FAINT))
@@ -845,8 +854,7 @@ class GladosTUI(TextualApp):
         mode = t("header.low") if cfg.model.is_low else ""
         self.query_one("#wordmark", Static).update(Text("G L a D O S", style=f"bold {WHITE}"))
         self.machine_text = t("tui.machine", model=cfg.model.name, mode=mode, os=osinfo.OS_LABELS[self.engine.os])
-        chip = t("tui.chip.local") if self.local_model else t("tui.chip.remote", host=self.model_host)
-        self.query_one("#chip", Static).update(Text(chip, style=MUTED))
+        self.draw_chip()
         self.query_one("#new-chat", Pill).set_label(t("tui.new_chat"))
         self.query_one("#nav-running-label", Static).update(t("tui.nav.running"))
         self.query_one("#nav-done-label", Static).update(t("tui.nav.session"))
@@ -856,6 +864,7 @@ class GladosTUI(TextualApp):
         self.query_one("#activity-title", Static).update(t("tui.activity"))
         self.query_one("#scope-title", Static).update(t("tui.aside.scope"))
         self.query_one("#sources-title", Static).update(t("tui.aside.sources"))
+        self.query_one("#egress-title", Static).update(t("tui.aside.egress"))
         self.query_one("#memory-title", Static).update(t("tui.memory"))
         self.refresh_send(relabel=True)
         self.draw_chips()
@@ -865,6 +874,18 @@ class GladosTUI(TextualApp):
         self.refresh_placeholder()
         self.update_status()
         self.refresh_aside()
+
+    def egress_counts(self) -> tuple[int, int]:
+        egress = self.engine.hctx.egress
+        return egress.counts() if egress is not None else (0, 0)
+
+    def draw_chip(self) -> None:
+        """머리글 칩 하나: 이 세션의 외부 전송·웹 검색 수 (보내면 밝게). 모델이 다른 컴퓨터면 그것도."""
+        sent, searches = self.egress_counts()
+        chip = Text(t("tui.chip.local", sent=sent, searches=searches), style=WHITE if sent else MUTED)
+        if not self.local_model:
+            chip.append(" · " + t("tui.chip.remote", host=self.model_host), style=MUTED)
+        self.query_one("#chip", Static).update(chip)
 
     def draw_chips(self) -> None:
         """입력창 위 할 수 있는 일 칩. 넓으면 앞에 "종류는 GLaDOS가 판단합니다"."""
@@ -1013,7 +1034,7 @@ class GladosTUI(TextualApp):
                 first = (str(d.get("text", "")).splitlines() or [""])[0]
                 card.add(Text("  " + first, style=FAINT))      # "$ 명령" (제안 줄은 맥락의 과정에만)
             for style, text in event_lines(e):
-                if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.PLAN) and side):
+                if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.PLAN, ev.EGRESS) and side):
                     continue
                 card.add(Text(text, style=STYLES.get(style, STYLES["plain"])))
             if e.kind in (ev.THOUGHT, ev.PROPOSAL):
@@ -1026,11 +1047,15 @@ class GladosTUI(TextualApp):
                     card.scope = [r.strip() for r in found.group(1).split(",") if r.strip()]
             if e.kind == ev.ANSWER:
                 card.sources = list(d.get("sources") or [])
+            if e.kind == ev.EGRESS:
+                card.egress.append((str(d.get("tool", "")), str(d.get("host", "")), str(d.get("what", ""))))
             if card.state == "running":
                 card.refresh_kicker()
-            if card is self.selected and e.kind in (ev.OBSERVATION, ev.ANSWER):
+            if card is self.selected and e.kind in (ev.OBSERVATION, ev.ANSWER, ev.EGRESS):
                 self.refresh_aside()
         self.add_activity(e)
+        if e.kind == ev.EGRESS:
+            self.draw_chip()
         if self.stop_event.is_set():
             return                                        # 상태 줄은 "멈추는 중"
         if e.kind == ev.START:
@@ -1080,6 +1105,10 @@ class GladosTUI(TextualApp):
             log.write(Text(f"      <- {first[:160]}", style=MUTED if first.startswith("Error") else FAINT))
         elif e.kind == ev.GUARD:
             log.write(Text("   ! " + t(d.get("key") or "guard.evidence"), style=MUTED))
+        elif e.kind == ev.EGRESS:
+            what = str(d.get("what", "")).replace("\n", " ")
+            log.write(Text.assemble(("      ↗ ", WHITE), (str(d.get("host", "")), WHITE),
+                                    ("  " + what[:100] + ("..." if len(what) > 100 else ""), FAINT)))
         elif e.kind == ev.ANSWER:
             log.write(Text("   = " + t("tui.translated" if d.get("translated") else "tui.answered"), style=FAINT))
         elif e.kind == ev.STOP:
@@ -1156,11 +1185,13 @@ class GladosTUI(TextualApp):
         for wid in ("#activity-title", "#activity"):
             self.query_one(wid).display = not at_home
         c = self.counts
+        sent_n, search_n = self.egress_counts()
         self.query_one("#session", Static).update(Text.assemble(
             (str(c["done"]), f"bold {WHITE}"), (f" {t('tui.stat.done')}   ", MUTED),
             (str(c["stopped"]), f"bold {WHITE}"), (f" {t('tui.stat.stopped')}   ", MUTED),
             (str(c["commands"]), f"bold {WHITE}"), (f" {t('tui.stat.commands')}", MUTED), "\n",
-            (t("tui.local_note") if self.local_model else t("tui.remote_note", host=self.model_host), MUTED),
+            (t("tui.local_note" if self.local_model else "tui.sent_note", sent=sent_n, searches=search_n), MUTED),
+            *((("\n" + t("tui.remote_note", host=self.model_host), MUTED),) if not self.local_model else ()),
         ))
         card = self.selected
         scope = card.scope if card is not None and not at_home else []
@@ -1178,6 +1209,19 @@ class GladosTUI(TextualApp):
         if len(sources) > len(shown):
             text.append(f"\n+{len(sources) - len(shown)}", style=FAINT)
         self.query_one("#sources", Static).update(text)
+        sent = card.egress if card is not None and not at_home else []
+        for wid in ("#egress-title", "#egress"):
+            self.query_one(wid).display = bool(sent)
+        out = Text()
+        for i, (tool, host, what) in enumerate(sent[-EGRESS_SHOWN:]):
+            if i:
+                out.append("\n")
+            out.append("↗ ", style=FAINT)
+            out.append(host, style=WHITE)
+            out.append("\n  " + (what if len(what) <= 90 else what[:89] + "…"), style=MUTED)
+        if len(sent) > EGRESS_SHOWN:
+            out.append(f"\n+{len(sent) - EGRESS_SHOWN}", style=FAINT)
+        self.query_one("#egress", Static).update(out)
 
     def layout_panels(self, width: int | None = None) -> None:
         width = width or self.size.width
@@ -1580,6 +1624,9 @@ class GladosTUI(TextualApp):
 def run_tui(cfg: Config, first_run: bool = False, notes: list[str] | None = None) -> int:
     shell.DETACH_CONSOLE = True                   # Windows: 명령이 TUI의 콘솔을 건드리지 못하게
     app = GladosTUI(cfg, first_run=first_run, notes=notes)
+    moved = app.engine.leave_safety_cwd()        # 소스 폴더에서 열었으면 작업 공간으로 (파일·명령이 막히지 않게)
+    if moved:
+        app.notes.append(t("cwd.moved", path=moved))
     try:
         app.run()
     finally:

@@ -218,3 +218,25 @@ def test_stopped_task_is_remembered_with_stop_note_and_report():
     assert "Do not call more tools" not in result.transcript[-2]["content"]   # 지시문은 기억에 남기지 않음
     turn = memory.add("학위논문 읽어줘", result)
     assert turn.render(FULL)[-1]["content"] == result.transcript[-1]["content"]
+
+
+def test_web_results_in_work_notes_and_local_texts():
+    from glados.core.context import local_texts, observation, unseen_urls, work_memo
+
+    memo = work_memo([{"tool": "web.search", "args": {"query": "llm metrics"},
+                       "head": 'Web search (Tavily, sent to api.tavily.com): "llm metrics" · 2 results\n'
+                               "- A | https://arxiv.org/abs/2610.00001\n  2026-10-02 · s\n- B | https://b.org/2"},
+                      {"tool": "fs.read", "args": {"path": "/home/u/c.txt"}, "head": "[/home/u/c.txt] contract text"}])
+    assert "  - A | https://arxiv.org/abs/2610.00001" in memo and "  - B | https://b.org/2" in memo
+    msgs = [observation("web.fetch", "Page: https://b.org/2\nsecret? no, public text"),
+            observation("fs.read", "[/home/u/c.txt] private contract text"),
+            {"role": "user", "content": "compare my contract"},
+            {"role": "user", "content": "[check] engine note"},
+            {"role": "assistant", "content": memo}]
+    local, user = local_texts(msgs)
+    assert "private contract text" in local and "public text" not in local         # 웹에서 온 글은 원래 밖에 있던 것
+    assert "arxiv.org" not in local and "/home/u/c.txt" in local                    # 작업 메모도 웹 줄은 뺀다
+    assert user == "compare my contract"
+    assert unseen_urls(["https://b.org/2/", "http://arxiv.org/abs/2610.00001", "https://c.org/3"], msgs) == [
+        "https://c.org/3"]
+    assert unseen_urls(["https://arxiv.org"], msgs) == ["https://arxiv.org"]          # 사이트 주소만으로는 안 됨

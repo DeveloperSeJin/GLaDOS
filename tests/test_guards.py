@@ -10,8 +10,6 @@ from __future__ import annotations
 import io
 import json
 
-import pytest
-
 from conftest import FakeLLM, act, answer, base_layers, make_ctx
 from glados import cli
 from glados.config import LoopLimits, ensure_home, load_config
@@ -207,3 +205,13 @@ def test_english_request_answered_in_korean_is_shown_in_english():
     llm = FakeLLM([answer("안녕하세요."), answer("안녕하세요, 연구원님."), translation("Hello, Researcher.")])
     result, _ = run(llm, "Hello there", tools=ToolRegistry(), reply_lang="en")
     assert result.answer.fact == "Hello, Researcher." and result.internal.fact == "Hello, Researcher."
+
+
+def test_needs_evidence_covers_information_that_changes():
+    from glados.core.guards import needs_evidence
+
+    for text in ("What is the latest version of Python?", "Any news about Qwen today?", "recent papers on RAG",
+                 "the price of an RTX 5090", "Summarize https://example.com/post", "find my contract"):
+        assert needs_evidence(text), text
+    for text in ("Hello there.", "Explain what a p value is.", "How did hypothesis B do?"):
+        assert not needs_evidence(text), text

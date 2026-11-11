@@ -384,7 +384,7 @@ def test_edit_refuses_documents(world):
 def test_scenario_find_read_summarize(world):
     home, hctx = world
     tools = load_hands(osinfo.current_os(), hctx)
-    assert tools.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run"]
+    assert tools.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run", "web.search", "web.fetch"]
     pdf = str(home / "Downloads" / "계약" / "2025_외주개발_계약서.pdf")
     llm = FakeLLM([
         act("fs.search", query="contract", kind="pdf", year=2025),

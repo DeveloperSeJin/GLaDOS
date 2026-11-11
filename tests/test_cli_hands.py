@@ -242,7 +242,7 @@ def test_hands_load_for_each_os(os_name, app):
     a, _ = app
     assert load_hands(os_name).names() == []                      # 손 정보가 없으면 도구 없음
     reg = load_hands(os_name, a.hctx)
-    assert reg.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run"]
+    assert reg.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run", "web.search", "web.fetch"]
     assert "fs.search(query, kind?, year?, roots?, content?, limit?)" in reg.describe()
 
 
@@ -262,3 +262,68 @@ def test_tool_timeout():
     with pytest.raises(ToolError) as e:
         reg.run(ToolCall("fs.read", {}))
     assert "took longer than 1s" in str(e.value)
+
+
+def test_egress_lines_sent_command_and_web_note(app, monkeypatch):
+    from glados.core import events as ev
+    from glados.core.events import Event
+
+    a, out = app
+    lines = cli.event_lines(Event(ev.EGRESS, {"tool": "web.search", "host": "api.tavily.com",
+                                              "what": "LLM evaluation metrics (past year)"}))
+    assert lines == [("dim", '↗ 외부 전송 · api.tavily.com · 검색어 "LLM evaluation metrics (past year)"')]
+    lines = cli.event_lines(Event(ev.EGRESS, {"tool": "web.fetch", "host": "arxiv.org", "what": "https://arxiv.org/abs/1"}))
+    assert lines == [("dim", "↗ 외부 전송 · arxiv.org · 페이지 읽기 https://arxiv.org/abs/1")]
+    a.command("/sent")
+    assert "밖으로 보낸 것이 없습니다" in out.getvalue()
+    a.hctx.egress.record("web.search", "api.tavily.com", "LLM evaluation metrics", "Tavily", "T1")
+    a.hctx.egress.record("web.fetch", "arxiv.org", "https://arxiv.org/abs/2610.00001", task="T1")
+    a.command("/sent")
+    text = out.getvalue()
+    assert "이 세션의 외부 전송 2건 (웹 검색 1건)" in text and "검색  api.tavily.com  LLM evaluation metrics" in text
+    assert "읽기  arxiv.org  https://arxiv.org/abs/2610.00001" in text and "egress.jsonl" in text
+    assert a.web_note().startswith("웹 검색이 꺼져 있습니다")
+    a.cfg.web.search = "tavily"
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    assert "TAVILY_API_KEY" in a.web_note()
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+    assert a.web_note().startswith("웹 검색: Tavily (api.tavily.com)")
+
+
+def test_task_events_from_hands_reach_the_screen_and_log(app):
+    """웹 손이 보내기 직전에 알린 외부 전송이 화면과 작업 기록에 남고, 작업이 끝나면 손의 알림 통로를 닫는다."""
+    from glados.core import events as ev
+    from glados.core.events import Event
+
+    a, out = app
+
+    def fake_search(args):
+        a.hctx.egress.record("web.search", "api.tavily.com", args["query"], "Tavily", a.hctx.task_id)
+        a.hctx.emit(Event(ev.EGRESS, {"tool": "web.search", "host": "api.tavily.com", "what": args["query"]}))
+        return "Web search (Tavily, sent to api.tavily.com): \"x\" · 0 results\nNo results."
+
+    a.tools = ToolRegistry([Tool("web.search", "search", run=fake_search)])
+    a.llm.steps = [act("web.search", query="LLM evaluation metrics"), answer("Nothing found.")]
+    a.ask_task("search the web for LLM evaluation metrics")
+    assert '↗ 외부 전송 · api.tavily.com · 검색어 "LLM evaluation metrics"' in out.getvalue()
+    task_id = a.task_log.recent(1)[0][0]
+    kinds = [r[0] for r in a.task_log.db.execute("SELECT kind FROM events WHERE task_id = ?", (task_id,))]
+    assert "egress" in kinds and a.hctx.emit is None
+
+
+def test_started_in_glados_folder_moves_to_the_workspace(app, tmp_path):
+    """uv run glados는 늘 소스 폴더에서 열린다. 거기서는 파일·명령이 막히므로 작업 폴더를 작업 공간으로 옮긴다."""
+    a, _ = app
+    docs = tmp_path.parent / (tmp_path.name + "-docs")
+    docs.mkdir()
+    a.hctx.user_dirs = {"documents": (str(docs),)}
+    assert a.workspace() == str(docs / "GLaDOS")                  # 기본: 문서 폴더 안의 GLaDOS
+    a.cfg.workspace = str(tmp_path.parent / (tmp_path.name + "-ws"))
+    assert a.workspace() == a.cfg.workspace                        # folders.toml workspace가 먼저
+    a.set_cwd(str(tmp_path / "logs"))                              # GLADOS_HOME 안 (안전장치)
+    assert a.cwd_is_safety()
+    moved = a.leave_safety_cwd()
+    assert moved == a.cfg.workspace and a.places.cwd == moved and a.hctx.places.cwd == moved
+    assert (tmp_path.parent / (tmp_path.name + "-ws")).is_dir() and not a.cwd_is_safety()
+    assert a.leave_safety_cwd() == ""                              # 이미 밖이면 그대로
+    assert "(relative paths and commands start here): " + moved in a.system_prompt()

@@ -26,13 +26,14 @@ from glados.config import Config, ConfigError, ensure_home, glados_home, load_co
 from glados.core import events as ev
 from glados.core.context import BRIEF, CLIPPED, DROPPED, FULL, MESSAGE_OVERHEAD, TASK_RESERVE, Conversation, limit_chars
 from glados.core.events import Event
-from glados.core.guards import DEFAULT_GUARDS, about_files
+from glados.core.guards import DEFAULT_GUARDS, needs_evidence
 from glados.core.llm import Cancelled, LLMError, OllamaClient, OllamaUnavailable
 from glados.core.loop import TaskResult, clip_output, run_task
 from glados.core.prompts import build_system_prompt, reply_note
 from glados.core.translate import Glossary, Translator, reply_language
 from glados.hands import HandContext, ToolError, load_hands
 from glados.hands import shell
+from glados.hands.web import Egress, search_status
 from glados.i18n import localized, t
 from glados.memory.log import PolicyLog, TaskLog, summarize_args
 from glados.safety.checkpoint import Checkpoints
@@ -41,7 +42,7 @@ from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 
 LATER = {"/servers": "M4", "/runs": "M5", "/resume": "M6"}
 LEVELS = (FULL, CLIPPED, BRIEF, DROPPED)
-STOPS = {"format", "same_call", "tool_errors", "max_steps", "user"}   # 엔진이 키로 알려 주는 멈춤 이유
+STOPS = {"format", "same_call", "tool_errors", "max_steps", "user", "denied"}   # 엔진이 키로 알려 주는 멈춤 이유
 SOURCES_SHOWN = 3        # 화면에 보여 줄 출처 수
 SHELL_LINES_SHOWN = 12   # GLaDOS가 실행한 명령의 출력을 화면에 몇 줄까지
 DIRECT_LINES_SHOWN = 200  # !명령 출력을 화면에 몇 줄까지
@@ -143,6 +144,10 @@ def event_lines(e: Event) -> list[tuple[str, str]]:
         out.append(("dim", t("render.blocked", tool=d["tool"], reason=reason)))
     elif e.kind == ev.GUARD:
         out.append(("dim", "... " + t(d.get("key") or "guard.evidence")))
+    elif e.kind == ev.EGRESS:
+        what = str(d.get("what", "")).replace("\n", " ")
+        out.append(("dim", t("render.egress_search" if d.get("tool") == "web.search" else "render.egress_fetch",
+                             host=d.get("host", ""), what=what[:120] + ("..." if len(what) > 120 else ""))))
     elif e.kind == ev.STOP:
         reason = d.get("reason")
         message = t(f"stop.{reason}", **d.get("params", {})) if reason in STOPS else d["message"]
@@ -185,6 +190,7 @@ class App:
             command_timeout_s=max(5, cfg.limits.local_timeout_s - 5),
             glossary=Glossary(self.llm, cfg.home / "cache" / "names-en.json"),   # 이름 속 낱말 -> 영어 (찾기)
             llm=self.llm, model_name=cfg.model.name,                             # fs.inspect가 파일마다 묻는 모델
+            web=cfg.web, egress=Egress(cfg.home / "logs" / "egress.jsonl"),     # 웹 손 (M3): 외부 전송 기록
         )
         self.translator = Translator(self.llm)            # 모델의 영어 답 -> 연구원님의 언어
         self.tools = load_hands(self.os, self.hctx)
@@ -208,6 +214,37 @@ class App:
 
     def cwd_is_safety(self) -> bool:
         return classify(self.places.cwd or self.places.home, self.places).safety
+
+    def workspace(self) -> str:
+        """GLaDOS가 새 파일을 만들고 명령을 돌려도 되는 곳: folders.toml workspace, 없으면 문서 폴더 안의 GLaDOS
+        (실제 문서 폴더: OneDrive·다른 드라이브로 옮긴 위치까지), 그것도 안 되면 홈 안의 GLaDOS."""
+        cands = []
+        if self.cfg.workspace:
+            cands.append(normalize(self.cfg.workspace, self.places))
+        docs = self.hctx.user_dirs.get("documents") or ()
+        base = next((d for d in docs if Path(d).is_dir()), docs[0] if docs else "")
+        if base:
+            cands.append(str(Path(base) / "GLaDOS"))
+        cands.append(str(Path(self.places.home) / "GLaDOS"))
+        for cand in cands:
+            loc = classify(cand, self.places)
+            if not loc.safety and not loc.protected:
+                return cand
+        return self.places.home
+
+    def leave_safety_cwd(self) -> str:
+        """GLaDOS를 자기 폴더(소스·GLADOS_HOME)에서 열었으면 작업 폴더를 작업 공간으로 옮긴다
+        (uv run glados는 늘 소스 폴더에서 열리는데, 거기서는 파일을 만들거나 명령을 돌릴 수 없다).
+        옮긴 곳을 돌려준다 (안 옮겼으면 ""). 화면을 열 때 한 번 부른다 (시험에서 만드는 App은 부르지 않음)."""
+        if not self.cwd_is_safety():
+            return ""
+        target = self.workspace()
+        try:
+            Path(target).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return ""
+        self.set_cwd(target)
+        return target
 
     def history_budget(self) -> int:
         """다음 작업에서 지난 대화에 쓸 글자 수 (루프가 작업을 시작할 때 쓰는 것과 같은 계산)."""
@@ -240,11 +277,14 @@ class App:
         task_id = self.task_log.new_task(request)
         self.hctx.task_id = task_id
         lang = reply_language(request, default=i18n.get_language())   # 연구원님이 쓴 언어 (답을 이 언어로 번역)
-        ctx = PolicyContext(places=self.places, registered_tools=frozenset(self.tools.names()))
+        ctx = PolicyContext(places=self.places, registered_tools=frozenset(self.tools.names()),
+                            private_names=self.cfg.private_words(), workspace=self.workspace())
 
         def emit(e: Event) -> None:
             self.task_log.event(task_id, e)
             self.render(e)
+
+        self.hctx.emit = emit                            # 손이 알리는 이벤트 (외부 전송)
 
         def audit(call: ToolCall, d: Decision, who: str) -> None:
             self.policy_log.write(call.tool, call.args, d.verdict, d.rule, who, task_id)
@@ -266,7 +306,7 @@ class App:
                 audit=audit,
                 overflow_dir=self.cfg.home / "logs" / "outputs",
                 task_id=task_id,
-                evidence_check=about_files,
+                evidence_check=needs_evidence,
                 answer_guards=DEFAULT_GUARDS,
                 translator=self.translator,
                 reply_lang=lang,
@@ -283,7 +323,8 @@ class App:
             self._abort(task_id, "llm", t("task.llm_failed", "en", detail=str(e)),
                         t("task.llm_failed", detail=localized(e)))
             return None
-
+        finally:
+            self.hctx.emit = None
         self.task_log.finish(task_id, result.status)
         self.memory.add(request, result)
         return result
@@ -348,11 +389,38 @@ class App:
                 s.say(f"{when}  {r.get('tool')}  {r.get('verdict')}  {rule}  ({who})")
         elif cmd == "/undo":
             self.undo()
+        elif cmd == "/sent":
+            for line in self.sent_lines():
+                s.say(line)
         elif cmd in LATER:
             s.say(t("command.later", cmd=cmd, stage=LATER[cmd]))
         else:
             s.say(t("command.unknown", cmd=cmd))
         return False
+
+    def sent_lines(self) -> list[str]:
+        """/sent: 이 세션에서 이 컴퓨터 밖으로 보낸 것 (웹 검색어, 읽은 주소)."""
+        egress = self.hctx.egress
+        items = egress.recent(30) if egress is not None else []
+        if not items:
+            return [t("sent.empty")]
+        total, searches = egress.counts()
+        lines = [t("sent.head", sent=total, searches=searches)]
+        for item in items:
+            when = datetime.fromtimestamp(item.ts).strftime("%H:%M:%S")
+            kind = t("sent.search" if item.tool == "web.search" else "sent.fetch")
+            lines.append(f"  {when}  {kind}  {item.host}  {item.what[:100]}")
+        lines.append(t("sent.log", path=self.cfg.home / "logs" / "egress.jsonl"))
+        return lines
+
+    def web_note(self) -> str:
+        """웹 검색을 쓸 수 있는지 한 줄 (처음 화면)."""
+        state, name, where = search_status(self.cfg.web, os.environ)
+        if state == "on":
+            return t("web.on", name=name, host=where)
+        if state == "nokey":
+            return t("web.nokey", name=name, var=where)
+        return t("web.off")
 
     def set_language(self, lang: str) -> None:
         """/lang: 이번 세션의 화면 언어만 바꾼다 (설정 파일은 연구원님이 직접 고침)."""
@@ -495,6 +563,7 @@ class App:
     def repl(self, first_run: bool = False) -> int:
         s = self.screen
         s.say(s.dim(self.header()))
+        s.say(s.dim(self.web_note()))
         s.say(t("greet.first", home=self.cfg.home) if first_run else t("greet.again"))
         if self.cwd_is_safety():
             s.say(s.dim(t("cwd.safety_note")))
@@ -577,6 +646,9 @@ def main(argv: list[str] | None = None) -> int:
     for note in notes:
         screen.say(screen.dim(note))
     app = App(cfg, screen)
+    moved = app.leave_safety_cwd()
+    if moved:
+        screen.say(screen.dim(t("cwd.moved", path=moved)))
     try:
         if not app.check_model():
             return 1

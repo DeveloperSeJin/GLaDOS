@@ -7,6 +7,7 @@
 작은 모델(qwen3.5:4b)이 실제로 낸 실수를 막는다.
 - "조건을 넓혀 보겠습니다"라고 해 놓고 아무것도 안 하고 끝냄 (promise_guard)
 - 파일에 관한 답을 도구로 확인하지 않고 지어냄 (about_files + 루프의 근거 확인)
+- 최신 정보(뉴스, 가격, 최근 논문)를 웹에서 확인하지 않고 기억으로 답함 (needs_evidence, M3)
 
 안전망 하나는 한 작업에서 한 번만 되돌린다. 두 번째 답은 그대로 받는다 (무한히 돌지 않게).
 되돌린 답은 화면에 나가지 않고 기억에도 남지 않는다 (loop.py).
@@ -44,9 +45,23 @@ FILE_TALK = re.compile(
 )
 
 
+# 때가 지나면 바뀌는 정보인가 (웹에서 확인해야 하는데 기억으로 지어내기 쉬운 것)
+FRESH_TALK = re.compile(
+    r"\b(?:latest|newest|recent(?:ly)?|news|today|tonight|yesterday|this (?:week|month|year)|prices?|weather"
+    r"|released?|web|online|internet|websites?|urls?|links?|look\s+up)\b"
+    r"|https?://",
+    re.IGNORECASE,
+)
+
+
 def about_files(text: str) -> bool:
     """글(연구원님 요청 + 모델의 영어 생각과 답)이 파일을 다루는가."""
     return bool(FILE_TALK.search(text))
+
+
+def needs_evidence(text: str) -> bool:
+    """확인하고 답해야 하는 이야기인가: 파일, 또는 때가 지나면 바뀌는 정보 (M3: 웹으로 확인)."""
+    return bool(FILE_TALK.search(text) or FRESH_TALK.search(text))
 
 
 def promise_guard(english: str, has_tools: bool) -> tuple[str, str] | None:

@@ -166,8 +166,9 @@ def test_answer_shows_in_chat_and_panel(tmp_path):
             assert not app.home.display                                # 처음 화면은 접힘
             assert str(app.query_one("#scope").render()) == "✓ ~/Downloads"          # 찾은 범위
             assert "[1] /d/학위논문.pdf" in str(app.query_one("#sources").render())  # 출처
-            item = app.query_one(NavItem)                               # 작업 목록의 '이번 대화'
-            assert item.parent.id == "nav-done" and "다운로드에서" in str(item.render()) and item.has_class("selected")
+            await until(pilot, lambda: len(app.query(NavItem)) == 1 and app.query_one(NavItem).parent.id == "nav-done")
+            item = app.query_one(NavItem)                               # 작업 목록의 '이번 대화' (옮기기가 끝난 뒤)
+            assert "다운로드에서" in str(item.render()) and item.has_class("selected")
     run(go())
     app.engine.close()
 
@@ -250,6 +251,7 @@ def test_digit_right_after_dialog_is_ignored_then_escape_denies(tmp_path):
         async with app.run_test(size=SIZE) as pilot:
             await send(pilot, "푸시해")
             await until(pilot, lambda: isinstance(app.screen, ChoiceDialog))
+            app.screen.opened = time.monotonic() + 30                    # 느린 컴퓨터에서도 "뜬 직후"로 (시험 시간과 무관하게)
             await pilot.press("1")                                       # 치던 글의 숫자: 받지 않음
             await pilot.pause(0.1)
             assert isinstance(app.screen, ChoiceDialog)
@@ -276,6 +278,7 @@ def test_dialog_buttons_are_one_line_and_enter_waits_for_guard(tmp_path):
             assert pills[0].label_text == "이번만 허용" and pills[0].key == "1" and pills[0].has_class("decide")
             assert pills[-1].label_text == "거절" and pills[-1].key == "3"
             assert str(pills[-1].render()) == "거절  3"
+            dialog.opened = time.monotonic() + 30                        # 느린 컴퓨터에서도 "뜬 직후"로
             await pilot.press("enter")                                   # 뜬 직후의 Enter: 받지 않음
             await pilot.pause(0.1)
             assert app.screen is dialog
@@ -283,7 +286,7 @@ def test_dialog_buttons_are_one_line_and_enter_waits_for_guard(tmp_path):
             assert dialog.focused.id != "pick-deny"
             await pilot.press("right")
             assert dialog.focused.id == "pick-deny"
-            dialog.opened -= 5                                           # 잠시 뒤
+            dialog.opened -= 60                                          # 잠시 뒤
             await pilot.press("enter")                                   # 포커스(거절)를 누른다
             await until(pilot, lambda: not app.job and app.engine.memory.turns)
             assert ran == [] and "연구원님:거절" in chat_text(app)
@@ -597,7 +600,7 @@ def test_start_screen_logo_greeting_and_hint(tmp_path):
 
     async def go():
         async with app.run_test(size=SIZE) as pilot:
-            await pilot.pause()
+            await until(pilot, lambda: app.home.size_key == "mid")      # 배치가 끝날 때까지 (Windows는 느림)
             assert "처음 뵙겠습니다" in str(app.home.greet.render()) and "glados --plain" in chat_text(app)
             assert str(app.query_one("#wordmark").render()) == "G L a D O S"
             assert str(app.query_one("#home-wordmark").render()) == "\n".join(logo.WORDMARK_3)   # 120칸: 3줄 글자
@@ -606,11 +609,9 @@ def test_start_screen_logo_greeting_and_hint(tmp_path):
             assert app.focused is app.query_one(ChatInput)
             assert app.query_one("#session").display and not app.query_one("#activity").display
             await pilot.resize_terminal(150, 40)
-            await pilot.pause()
-            assert app.home.size_key == "big"                       # 넓으면 큰 로고
+            await until(pilot, lambda: app.home.size_key == "big")   # 넓으면 큰 로고 (배치가 끝날 때까지 기다림: Windows는 느림)
             await pilot.resize_terminal(200, 50)
-            await pilot.pause()
-            assert app.home.size_key == "xl"                        # 아주 넓으면 더 큰 로고 (점이 많아 매끄럽다)
+            await until(pilot, lambda: app.home.size_key == "xl")    # 아주 넓으면 더 큰 로고 (점이 많아 매끄럽다)
             assert str(app.query_one("#home-wordmark").render()) == "\n".join(logo.WORDMARK_5)
     run(go())
     app.engine.close()
@@ -621,9 +622,10 @@ def test_suggestion_fills_input_and_new_chat_button(tmp_path):
 
     async def go():
         async with app.run_test(size=SIZE) as pilot:
+            await until(pilot, lambda: app.home.size_key == "mid")      # 카드 자리가 정해진 뒤에 누른다
             await pilot.pause()
             await pilot.click("#suggest-file")
-            assert app.query_one(ChatInput).value == "다운로드에서 논문 찾아줘"
+            await until(pilot, lambda: app.query_one(ChatInput).value == "다운로드에서 논문 찾아줘")
             await send(pilot, "/help")
             assert not app.home.display
             await pilot.click("#new-chat")
@@ -711,3 +713,50 @@ def test_wordmark_rows_have_equal_width():
     for rows, lines in ((3, logo.WORDMARK_3), (4, logo.WORDMARK_4), (5, logo.WORDMARK_5)):
         assert len(lines) == rows and len({len(line) for line in lines}) == 1
         assert logo.wordmark_width(rows) == len(lines[0])
+
+
+# ---------------------------------------------------------------- 웹 (M3)
+def test_web_search_lights_the_chip_and_lists_what_was_sent(tmp_path, monkeypatch):
+    """진짜 웹 손 + 이 컴퓨터에 띄운 가짜 검색 서비스: 머리글 칩, 과정, 오른쪽 "밖으로 보낸 것", /sent."""
+    from test_web import Site
+
+    from glados.hands import web
+
+    site = Site()
+    monkeypatch.setattr(web, "BASES", {"tavily": site.base + "/tavily"})
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    home, work = tmp_path / "glados_home", tmp_path / "work"
+    work.mkdir()
+    ensure_home(home)
+    cfg = load_config(home)
+    cfg.web.search = "tavily"
+    llm = FakeLLM([{**act("web.search", query="LLM evaluation metrics", time_range="year"),
+                    "plan": ["Search the web.", "Answer with URLs."]},
+                   answer("Two recent papers.", "", ["https://arxiv.org/abs/2610.00001"]),
+                   translation("최근 논문 2편입니다.")])
+    app = GladosTUI(cfg, llm=llm, os_name="linux", check_model=False)
+    app.engine.set_cwd(str(work))
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            assert str(app.query_one("#chip").render()) == "외부 전송 0 · 웹 검색 0"
+            assert "웹 검색: Tavily (127.0.0.1:" in chat_text(app)                 # 처음 화면 안내
+            await pilot.press(*"LLM 평가 지표 최신 논문 찾아줘", "enter")
+            await until(pilot, lambda: not app.job and len(app.engine.memory.turns) == 1)
+            assert str(app.query_one("#chip").render()) == "외부 전송 1 · 웹 검색 1"
+            panel = activity_text(app)
+            assert "↗ 127.0.0.1:" in panel and "LLM evaluation metrics (past year)" in panel
+            card = app.query_one(TaskCard)
+            assert card.egress == [("web.search", f"127.0.0.1:{site.server.server_address[1]}",
+                                    "LLM evaluation metrics (past year)")]
+            assert app.query_one("#egress").display and "LLM evaluation metrics" in str(app.query_one("#egress").render())
+            assert "↗ 외부 전송" not in chat_text(app)                               # 맥락이 보이면 카드에는 답만
+            assert "최근 논문 2편입니다." in chat_text(app)
+            await send(pilot, "/sent")
+            await until(pilot, lambda: "이 세션의 외부 전송 1건 (웹 검색 1건)" in chat_text(app))
+    try:
+        run(go())
+    finally:
+        app.engine.close()
+        site.close()

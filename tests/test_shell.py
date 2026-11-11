@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
-import os
 import shutil
-import sys
 import time
 
 import pytest
@@ -223,7 +221,7 @@ def test_cd_changes_session_folder(app, tmp_path):
     assert "폴더가 없습니다" in out.getvalue() and a.places.cwd == str(sub)
     a.run_direct("cd ..")
     assert a.places.cwd == str(work)
-    assert f"Working folder: {work}" in a.system_prompt()
+    assert f"Working folder (relative paths and commands start here): {work}" in a.system_prompt()
 
 
 def test_direct_empty_and_failures(app):
@@ -247,7 +245,7 @@ def test_glados_runs_command_and_shows_output(app):
 def test_system_prompt_has_shell_folder_and_reply_language_last(app):
     a, _, work = app
     prompt = a.system_prompt()
-    assert "Commands (shell.run):" in prompt and f"Working folder: {work}" in prompt
+    assert "Commands (shell.run):" in prompt and f"Working folder (relative paths and commands start here): {work}" in prompt
     a.llm.steps = [answer("Hello."), answer("Hello, Researcher."), {"fact": "안녕하세요, 연구원님.", "wit": ""}]
     a.tools = ToolRegistry([Tool("fs.read", "read", run=lambda args: "x")])
     a.ask_task("Hello there, how are you?")
@@ -265,3 +263,28 @@ def test_repl_routes_bang_lines(app, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt="": next(lines))
     a.repl()
     assert "사용법: !명령" in out.getvalue()
+
+
+# ---------------------------------------------------------------------- 맨 앞의 cd (2026-11-11 실사용)
+SRC = "C:\\Users\\User\\code\\glados"
+
+
+@pytest.mark.parametrize("command, verdict, rule", [
+    # 소스 폴더에서 열린 세션이어도, 맨 앞에서 다른 폴더로 옮기면 뒤의 상대 경로는 그 폴더 기준 (전에는 차단)
+    ("cd C:\\Users\\User; python hello_temp.py", "ask", "기본:shell.run:*"),
+    ('Set-Location "C:\\Users\\User\\Documents\\GLaDOS" && python hello.py', "ask", "기본:shell.run:*"),
+    # 옮긴 곳이 안전장치거나, 옮긴 뒤 상대 경로가 안전장치를 가리키면 여전히 차단
+    ("cd src; python -c 1", "deny", "코드:안전장치"),
+    ("cd ..; type glados\\src\\glados\\safety\\policy.py", "deny", "코드:안전장치"),
+    ("python C:\\Users\\User\\hello_temp.py", "deny", "코드:안전장치폴더"),
+])
+def test_leading_cd_sets_the_folder_for_later_paths(policy, command, verdict, rule):
+    ctx = make_ctx("windows", places_kw={"cwd": SRC})
+    d = check(policy, "windows", "shell.run", ctx=ctx, command=command)
+    assert (d.verdict, d.rule) == (verdict, rule), command
+
+
+def test_cd_into_glados_folder_is_still_blocked(policy):
+    ctx = make_ctx("windows", places_kw={"cwd": "C:\\Users\\User"})
+    d = check(policy, "windows", "shell.run", ctx=ctx, command=f"cd {SRC}; python x.py")
+    assert d.verdict == "deny"
