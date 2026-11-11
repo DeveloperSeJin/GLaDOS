@@ -3,7 +3,7 @@
 Grounded Logic and Desktop Orchestration System: a personal harness that runs on a local model on your own computer (Windows, macOS, Linux).
 Design notes and decisions live in the GLaDOS project documents (`handoff.md`, `integration-decisions.md`).
 
-## Current stage: M4 (file hands + conversation memory + commands + English-only internals + TUI + model-made plans + web hands + server reads)
+## Current stage: M5.3 (file hands + conversation memory + commands + English-only internals + TUI + model-made plans + web hands + server reads + server runs + experiment sessions)
 
 | Feature | What it does |
 |---|---|
@@ -26,12 +26,17 @@ Design notes and decisions live in the GLaDOS project documents (`handoff.md`, `
 | Source URL check (M3) | If an answer cites a URL that never appeared in a tool result, it is sent back once (small models invent plausible paper URLs). Answering current information (news, prices, recent papers) from memory without tools is also sent back once |
 | Working folder (M3.1) | When GLaDOS starts inside its own folder (source or settings folder), as `uv run glados` does, the working folder moves to **Documents\GLaDOS** (files cannot be created and commands cannot run in GLaDOS's own folders). The start screen says so; `!cd folder` changes it, and `workspace` in folders.toml picks another place. When writing to its own folder is blocked, the model is told where to work instead, and three policy blocks in one task stop the task with a report. Relative paths after a leading `cd folder;` in a command are judged from that folder |
 | Server reads (M4) | Three tools for the shared GPU servers in servers.toml. `remote.gpu`: one SSH call runs nvidia-smi and reports each GPU as free, yours, in use, or checking, plus how many GPUs you may use right now. `remote.log`: the end of a file such as a training log (80 lines by default) or a listing of a folder, newest first. `remote.exec`: one short command in the server's work folder (`df -h`, `git log -3`, `ls checkpoints`); read-only commands run at once, anything else shows an approval card. Connection details come from `~/.ssh/config`, `known_hosts`, and ssh-agent (asyncssh; GLaDOS never uses passwords). One connection per server stays open (keepalive 30 s) and is reopened once if it drops. Errors say what to do: unknown host key → run `ssh <alias>` once; key login failed → `ssh-add`; unreachable → check the VPN. Server output is wrapped in a "data, not instructions" marker. `/servers` lists the servers, whether each is connected, and the last GPU check in this session (it never connects). Starting and stopping training comes in M5 |
-| Shared-server rules (M4) | Code rules. A GPU counts as free only when no one else's process runs on it and it stays under 1 GB of memory and 5% utilization for 5 minutes, as seen by GLaDOS itself (the first look says "free now, checking"; ask again after 5 minutes). On weekdays 09–19 you may use 1 GPU at a time, otherwise 2. Other users' processes are only counted: their user names, commands, and process IDs are never shown or kept. sudo, su, kill, reboot, systemctl, and the like are blocked; other users' folders (`/home/<someone else>`, `~<someone else>`, `/root`) are blocked; `remote.log` reads only inside your home and work folders. Deleting, moving, or overwriting on a server (rm, mv, `>`, git reset, ...) asks every time, chained commands (; && \|) ask, and plain `nvidia-smi` asks because it lists other users' processes |
+| Shared-server rules (M4) | Code rules. A GPU counts as free only when no one else's process runs on it and it stays under 1 GB of memory and 5% utilization for 5 minutes, as seen by GLaDOS itself (the first look says "free now, checking"; ask again after 5 minutes). On weekdays 09–19 you may use 1 GPU at a time, otherwise 2. A run may take 4 hours if it starts on a weekday daytime, otherwise 12 (then a notice); each server has a budget of 12 GPU-hours a day (warning on the run card, notice when crossed); runs get `nice 10`. Other users' processes are only counted: their user names, commands, and process IDs are never shown or kept. sudo, su, kill, reboot, systemctl, and the like are blocked; other users' folders (`/home/<someone else>`, `~<someone else>`, `/root`) are blocked; `remote.log` reads only inside your home and work folders. Deleting, moving, or overwriting on a server (rm, mv, `>`, git reset, ...) asks every time, chained commands (; && \|) ask, starting background jobs with `remote.exec` (nohup, `&`, `tmux new`, screen) asks because training goes through `remote.run`, `tmux kill-session` is blocked (stop runs with `remote.stop`), and plain `nvidia-smi` asks because it lists other users' processes |
+| Server runs (M5) | `remote.run` starts training on a server in a tmux session. Before asking, GLaDOS reads the GPUs, the folder, tmux, and git, and the approval box asks **"이 명령어가 맞습니까?" (is this command right?)** over a **run card**: run ID (EXP-01, EXP-02, ...), server and GPUs, command, folder, GPU memory needed and why, commit and uncommitted files, tmux session (`tmux attach -r -t ...` to watch read-only), and the shared-server rules with warnings when a limit would be crossed. Every run asks (no "for this task"); answering no makes GLaDOS ask what to change. On the server, `<work folder>/.glados/runs/EXP-NN/` keeps the command (`command.sh`), the run script (`run.sh`), the commit, `diff.patch` (uncommitted changes), the output (`output.log`), and the exit code. The session opens your login shell (so `.bashrc`, conda, and modules load), then runs the command with `CUDA_VISIBLE_DEVICES` set to the chosen GPUs (numbered as in nvidia-smi), `nice 10`, and unbuffered Python output. If no GPU fits yet (see GPU memory below), the run waits in a queue and starts by itself once one does, as long as GLaDOS stays open. `remote.stop` sends Ctrl+C (so training can save), closes the session if it is still running after 15 s, and also cancels a queued run; it asks every time. `remote.log run=EXP-NN` shows a run's state, its metrics table, and the end of its output. `/runs` lists runs. Runs are recorded in `runs.db` and `logs/runs.jsonl` in `GLADOS_HOME` |
+| GPU memory (M5.1) | A run needs a GPU with enough free memory, not an empty GPU: free memory (total − used) must stay above the run's need plus a margin (10%, at least 2 GB) for 5 minutes, judged by the lowest value in those 5 minutes (other people's jobs grow and shrink, e.g. during evaluation). This can put a run on a GPU someone else is using; the run card then warns that both jobs slow down and that either may run out of memory if the other grows (a stronger warning when that GPU is over 80% busy). GPUs used by no one else and with the most free memory are chosen first. The need comes from, in order: what you said ("24GB 필요", `mem_gb`); the peak GLaDOS measured when the same command ran before in the same folder (it records your process's GPU memory every minute); an estimate from the code. For the estimate, GLaDOS reads the relevant lines on the server (the script's arguments and model, batch, precision, optimizer lines, the config files in the command), the model fills in the facts (model size, full/LoRA/frozen/inference, precision, optimizer, batch, sequence length, hidden size, layers), and a formula computes it (weights, gradients, optimizer state, activations, CUDA overhead); the run card shows the basis, e.g. `bert-base-uncased · 0.11B · fp32 · full training · adam · batch 32 · seq 128`. If the size cannot be worked out, only a fully free GPU is used, as before |
+| Projects (M5.2) | Folders under `<work folder>/code` on the server (`projects` in servers.toml) are projects. "무슨 프로젝트 있어?" (what projects are there?) lists them with git branch, last commit date, the README's first lines, and the scripts. Asking about one makes GLaDOS read its files (layout, README, entry files and their `argparse`/hydra/click arguments with defaults, shell scripts, configs, requirements) and explain what it does and how to run it. Give it a script and arguments ("bert-cls에서 train.py --batch 32 돌려줘") and it builds the full command for that project, runs it in the project folder (`project=bert-cls`), and asks "이 명령어가 맞습니까?" first |
+| Experiment sessions (M5.3) | Each run is an experiment session with a folder on this computer: **Documents\GLaDOS\experiments\EXP-NN_project** (under `workspace` if set in folders.toml). GLaDOS reads what the run prints (the server's `output.log`) and builds `metrics.csv` (a table of every epoch or step), `metrics.png` (a graph per metric over the whole run, best value marked), and `summary.md` (command, commit, GPUs, memory, state, the table with every epoch (evenly thinned to 200 rows only for very long step-based logs), best values, the last lines of output); copies go to the run's record folder on the server too. Output repeats the same shape, so only the beginning is used to find the pattern: once about 40 lines with numbers have appeared, the model looks at the names found in them, a few example lines, and the first lines, and decides what to extract (x axis such as epoch or step; metrics such as train_loss, dev_acc with the word that marks dev lines; whether higher or lower is better). After that, GLaDOS reads only new output, takes just those numbers into the table, and drops the text, so it keeps little: the table, where it stopped reading, the current epoch, the names it has seen, and the last 50 lines. If a new kind of line appears later (dev results often start only after the first epoch), it shows the model just those names and decides again (up to 3 times). Any print format works; the full output stays on the server. Updated every 5 minutes while the run goes, at the end, and whenever you ask "EXP-03 어때?" (how is EXP-03?) or continue it ("EXP-03 이어서"); the end notice shows the best values and the folder. If GLaDOS was closed, it catches up the next time it opens |
+| Watching runs (M5) | While GLaDOS is open, it checks waiting and running runs every minute (only servers that have one): finished (exit code and last line), failed, gone without an exit code, loss NaN or inf, the maximum run time reached, today's GPU-hour budget exceeded, and the work folder's disk over 90% full. NaN and time limit are "decision needed" notices: GLaDOS does not stop anything by itself; say "EXP-03 멈춰" (stop EXP-03) to stop it. Notices appear as cards in the chat (cobalt for decisions), as a toast, and as an OS notification (Windows notification center; macOS and Linux notifications too; `[ui] notify = false` turns that off). Nothing runs on the server besides your runs: runs that ended while GLaDOS was closed are noticed the next time it opens, and runs that were still waiting for a GPU when it closed are cancelled with a notice |
 | Live progress (M2.7) | While a TUI task runs: elapsed time (header state, card kicker, and the task list, e.g. `진행 중 · 2단계 · 47초`), tokens exchanged with the model (inside the card: `↑ sent  ↓ received`, with the last three lines of text being received: plans, thoughts, tool calls, inspection, translation). When the answer arrives the box is cleared and only the answer remains (also on stop). The process panel gets a total line (`= 47초 · ↑ 6.1k ↓ 102 토큰`). ↑ is Ollama's prompt_eval_count, ↓ is the chunk count while receiving and eval_count at the end. Refreshed every 0.25 s but paused while the input box has text (protects Korean IME composition); with `[ui] motion = false` it refreshes only when the step changes. The line screen (`--plain`) is unchanged |
 | Logo (M2.6) | `logo.py` draws 06 LISSAJOUS with Braille characters. Presence states follow brand-identity: idle is a dim 1:2 curve with a still dot, working is a 3:2 curve with a moving dot (two-dot tail, about 7 s per loop), waiting for a decision is a dim curve with a breathing dot. Only the header symbol moves, only while working or waiting, and it pauses while the input box has text. `[ui] motion = false` keeps it still |
 | Line screen | `glados --plain` or `[ui] screen = "plain"`: the classic REPL. One-shot runs (`glados "task"`) and pipes always use the line screen. Facts in bold, wit dimmed |
 | Logs | `tasks.db` + `logs/tasks.jsonl`; policy decisions in `logs/policy.jsonl` |
-| Tests | 481 (policy 78, outgoing text check 63, file hands 43, commands 42, loop 38, TUI and logo 31, server reads 29, screen and tool lists 26, screen language 22, safety nets 18, memory 17, settings 17, web hands 16, model calls 16, English matching 13, contents and inspection 12). The TUI runs headless (Textual Pilot). Web hands are tested against fake search services and fake sites on this computer (no internet). Server reads are tested against a fake SSH server on this computer with fake nvidia-smi and ps (skipped on Windows; the rule and policy tests still run). If PowerShell is installed, Windows command paths run for real |
+| Tests | 531 (policy 78, outgoing text check 63, file hands 43, commands 42, loop 38, TUI and logo 33, server reads 29, server runs 28, screen and tool lists 26, experiment sessions 20, screen language 22, safety nets 18, memory 17, settings 17, web hands 16, model calls 16, English matching 13, contents and inspection 12). The TUI runs headless (Textual Pilot). Web hands are tested against fake search services and fake sites on this computer (no internet). Server reads, runs, and experiment sessions are tested against a fake SSH server on this computer with fake nvidia-smi and ps, a real tmux, a test clock for the 5-minute rule and time limits, and a scripted model for memory estimates and metric choices (skipped on Windows; the rule and policy tests still run). If PowerShell is installed, Windows command paths run for real |
 
 ## Install and run
 
@@ -57,7 +62,7 @@ uv run glados
 
 - Line screen: `uv run glados --plain` (if Korean input misbehaves in the TUI; to keep it, set `[ui] screen = "plain"` in glados.toml)
 - One-shot task: `uv run glados "다운로드 폴더에서 계약서 PDF 찾아줘"`
-- Commands: `/help`, `/new`, `/context`, `/lang`, `/log`, `/sent`, `/servers`, `/undo`, `/quit`, `!command` (e.g. `!git status`, `!dir`, `!cd folder`)
+- Commands: `/help`, `/new`, `/context`, `/lang`, `/log`, `/sent`, `/servers`, `/runs`, `/undo`, `/quit`, `!command` (e.g. `!git status`, `!dir`, `!cd folder`)
 - English screen: add `[ui]` with `language = "en"` to glados.toml in `GLADOS_HOME` (older settings files lack this key, so they default to Korean). Answers always follow the language of the question
 - Ctrl+C during a task (also Esc in the TUI) stops only that task. Quit the TUI with Ctrl+Q or `/quit`
 - TUI keys: Enter send, ↑↓ sent messages, F1 help, F2 context panel (right), F3 task list (left), PgUp/PgDn scroll. Below 110 columns the task list hides, below 90 the context panel hides (the default Windows Terminal window is 120×30)
@@ -149,7 +154,8 @@ Fill in servers.toml in `GLADOS_HOME` and reopen GLaDOS. One `[[server]]` block 
 alias = "server-a"                       # the Host name in ~/.ssh/config
 gpus = 4
 workdir = "/home/<user>/workspace"       # your work folder; remote.exec and relative paths start here
-tmux_prefix = "glados-<user>"            # used from M5
+tmux_prefix = "glados-<user>"            # tmux session names for runs
+projects = "code"                        # project folders under the work folder (default "code")
 
 [[server]]
 alias = "server-b"
@@ -169,6 +175,35 @@ tmux_prefix = "glados-<user>"
 | server-a is not a configured server | `alias` in servers.toml does not match; reopen GLaDOS after editing servers.toml |
 
 No need to restart GLaDOS after fixing the key: ask again and it connects.
+
+**For runs (M5)**
+
+- The server needs `tmux` (`tmux -V`; if it is missing, ask the server admin). GLaDOS never installs anything there.
+- Runs open your login shell first, so whatever `ssh server-a` gives you interactively (conda, modules, PATH) is there. To use a conda environment, put it in the request: `conda activate myenv && python train.py`.
+- Put your code in a git repository under the work folder: the commit and uncommitted changes are saved with each run. A folder without git still runs, with a note on the run card.
+- Each run leaves `<work folder>/.glados/runs/EXP-NN/` on the server. Delete old ones yourself when you no longer need them.
+- Projects are the folders under `<work folder>/code`. If yours live elsewhere, set `projects = "my_projects"` (under the work folder) or an absolute path in the server's block in servers.toml.
+- For the metrics table, print the numbers you want to see (e.g. `print(f"epoch {e} train_loss {loss:.4f}")` and `print(f"[dev] epoch {e} acc {acc:.4f}")`). Any `name value`, `name: value`, or `name=value` format works, including tqdm postfixes and dict prints; numbers written only to other files are not read.
+- M5.3 adds matplotlib (for the graphs): run `uv sync` after pulling.
+
+## Things to try: M5.1–M5.3 (memory, projects, experiment sessions)
+
+1. `server-a에 무슨 프로젝트 있어?` (what projects are on server-a?) → the list from `code/`
+2. `bert-cls 프로젝트 어떻게 실행해?` (how do I run bert-cls?) → an overview: what it does, the entry file, and the main arguments with defaults
+3. `bert-cls에서 train.py --batch 32 돌려줘` (run train.py --batch 32 in bert-cls) → the box asks "이 명령어가 맞습니까?" over the run card. Check the full command and the memory line (an estimate from the code with its basis). Choose 아니요 (no) and say what to change, e.g. `--lr 3e-5도 넣어` (add --lr 3e-5) → a new card
+4. `메모리는 20GB면 돼` (20GB is enough) → the card says 20GB (as you said); a GPU another person is using but with enough room may be chosen, with a warning on the card
+5. While it runs: `EXP-01 어때?` → state, the last rows of the metrics table, best values. Open Documents\GLaDOS\experiments\EXP-01_bert-cls: `summary.md`, `metrics.csv`, `metrics.png`, `output.log`
+6. Close GLaDOS for a while, open it again → the folder catches up (and a notice if the run ended meanwhile); `EXP-01 이어서` (continue EXP-01) picks up the session
+7. Run the same command again → the memory line now says the peak measured in EXP-01
+
+## Things to try: M5 (runs)
+
+1. `server-a에서 proj 폴더의 python train.py --lr 3e-4 돌려줘` (run train.py in proj on server-a) → the run card appears: EXP-01, the GPU, the command, the commit, the tmux session, and the rules. Usually the first time it says it will start once a GPU is confirmed free (GLaDOS has not watched the GPUs for 5 minutes yet). Approve with 1
+2. About 5 minutes later the notice `EXP-01 시작: server-a GPU 1 (5분 기다림)` appears (card, toast, Windows notification). In another terminal, `ssh server-a` then `tmux attach -r -t <session from the card>` shows the live output (read-only; leave with Ctrl+B then D)
+3. `/runs` → EXP-01 running, with its tmux session. `EXP-01 어때?` (how is EXP-01?) → `remote.log run=EXP-01` → state, elapsed time, and the last lines
+4. NaN check without a real model: `server-a에서 echo "step 1 loss 0.5"; echo "step 2 loss nan"; sleep 600 돌려줘` → within a minute of starting, a "결정 필요" (decision needed) notice about NaN. Then `EXP-02 멈춰` (stop EXP-02) → an approval box → stopped with Ctrl+C (exit 130)
+5. Close GLaDOS while a short run is going (`sleep 120; echo done`), wait 2 minutes, open it again → a notice that it finished while GLaDOS was closed
+6. If GLaDOS ever tries to start a job with `remote.exec` (`nohup python train.py &`, `tmux new ...`), the approval card says training goes through `remote.run`; deny it. `tmux kill-session` through `remote.exec` is blocked
 
 ## Things to try: M4 (servers)
 
@@ -277,14 +312,19 @@ src/glados/
   safety/locations.py three kinds of location
   safety/checkpoint.py checkpoints, /undo
   safety/privacy.py   outgoing text check (personal details, file contents, local addresses); code rules
-  safety/fair.py      shared-server rules: when a GPU counts as free, how many GPUs you may use now
+  safety/fair.py      shared-server rules: when a GPU counts as free, how many GPUs you may use now, run time, GPU-hour budget
   hands/fs.py         file hands (same code on every OS)
   hands/docs.py       document contents: pdf and docx text extraction, cache of text and inspection answers (no judging)
   hands/shell.py      command hands: shell.run and the chat's !command (PowerShell on Windows, bash/zsh on macOS and Linux)
   hands/web.py        web hands: web.search (pluggable: Tavily, Brave, SearXNG, Ollama), web.fetch (main-text extraction), sent-outside log
-  hands/remote.py     server hands: SSH connection hub (asyncssh, one connection per server), remote.gpu, remote.log, remote.exec
+  hands/remote.py     server hands: SSH connection hub (asyncssh, one connection per server), remote.gpu, remote.log, remote.exec, remote.run, remote.stop
+  hands/runner.py     server runs: run card, tmux start (run folder, git snapshot), queue for GPUs, stop, watching and notices, experiment sessions
+  hands/memest.py     GPU memory estimate: relevant code lines from the server, facts from the model, the formula
+  hands/metrics.py    metrics from printed output: name-number pairs, the model's choice, table, graph
   hands/<os>/         per-OS hands (app control in v1)
   memory/log.py       task log, policy decision log
+  memory/runs.py      server run records (runs.db): EXP-NN, server, GPUs, session, commit, state
+  notify.py           OS notifications (Windows toast, macOS, Linux notify-send)
   defaults/           default settings written on first run
 tests/
 ```
@@ -293,4 +333,4 @@ In v0 the hands live inside the engine. When an external program (VSCode, etc.) 
 
 ## Next
 
-M5 server runs and monitoring (remote.run in tmux with a run card, waiting for a free GPU by the rules above, `/runs`, progress and finish notices) → M6 resume and memory
+M6: resume earlier sessions (`/resume`), memory (MEMORY.md), the scenario test set, and installing `glados` as a command that runs from anywhere

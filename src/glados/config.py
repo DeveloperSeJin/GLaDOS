@@ -107,6 +107,7 @@ class Server:
     gpus: int = 0
     workdir: str = ""
     tmux_prefix: str = ""
+    projects: str = "code"           # 프로젝트 폴더들이 있는 곳 (작업 폴더 아래, 또는 절대 경로·~/...)
 
 
 @dataclass
@@ -124,6 +125,7 @@ class Config:
     language: str = DEFAULT_LANG     # 화면 언어 "ko" | "en" (답은 물은 언어로)
     screen: str = "tui"              # 화면 종류 "tui" | "plain" (glados --plain/--tui가 먼저)
     motion: bool = True              # TUI의 움직이는 표시 (작업 중 로고의 점). 끄면 멈춘 그림만
+    notify: bool = True              # 서버 실행 알림을 OS 알림(Windows 알림 센터 등)으로도 (M5)
     web: WebConfig = field(default_factory=WebConfig)
     private_names: list[str] = field(default_factory=list)   # [privacy] names: 밖으로 보내면 묻는 이름
 
@@ -186,6 +188,9 @@ def load_config(home: Path) -> Config:
     motion = ui.get("motion", True)
     if not isinstance(motion, bool):
         raise ConfigError("config.motion", value=motion)
+    notify = ui.get("notify", True)
+    if not isinstance(notify, bool):
+        raise ConfigError("config.notify", value=notify)
 
     loop_sec = main.get("loop", {})
     limits = LoopLimits(**{k: int(v) for k, v in loop_sec.items() if k in LoopLimits.__dataclass_fields__})
@@ -214,6 +219,7 @@ def load_config(home: Path) -> Config:
             gpus=int(s.get("gpus", 0)),
             workdir=str(s.get("workdir", "")),
             tmux_prefix=str(s.get("tmux_prefix", "")),
+            projects=str(s.get("projects", "code") or "code"),
         )
         for s in servers.get("server", [])
         if str(s.get("alias", "")).strip()
@@ -239,6 +245,7 @@ def load_config(home: Path) -> Config:
         language=language,
         screen=screen,
         motion=motion,
+        notify=notify,
         web=web,
         private_names=private_names,
     )

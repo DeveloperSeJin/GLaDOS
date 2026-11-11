@@ -99,7 +99,8 @@ remote.log:              # 서버의 로그 끝·폴더 목록. 코드 규칙: �
 
 remote.exec:             # 서버에서 짧은 명령 (작업 폴더에서). 허용 목록 밖은 승인. 코드 규칙: sudo·su,
   "*": ask               #   kill·reboot·systemctl, 다른 사람 폴더(/home/다른사람, ~다른사람, /root)는 차단,
-  # 상태 보기             #   잇거나 돌리면(; && | >) 승인. 학습 실행은 M5의 remote.run
+  # 상태 보기             #   지우기·옮기기·덮어쓰기와 백그라운드로 띄우기(nohup, tmux new, &)는 매번 승인,
+                         #   잇거나 돌리면(; && | >) 승인. 학습 실행은 remote.run
   "nvidia-smi -L": allow           # 그냥 nvidia-smi는 다른 사람 프로세스까지 보여 줘서 승인 (GPU 상태는 remote.gpu로)
   "nvidia-smi --query-gpu*": allow
   "df": allow
@@ -138,6 +139,15 @@ remote.exec:             # 서버에서 짧은 명령 (작업 폴더에서). 허
   "conda env list": allow
   "conda list*": allow
   "tmux ls": allow
+
+remote.projects:         # 서버의 프로젝트 목록, 프로젝트 하나의 파일 (README·실행 파일·인자·설정). 읽기만
+  "*": allow
+
+remote.run:              # 서버에서 학습 실행 (tmux). 코드 규칙: 매번 승인 (실행 카드: GPU·명령·커밋·규칙),
+  "*": ask               #   sudo·kill·다른 사람 폴더는 차단. 여기를 allow로 바꿔도 묻는다 (deny는 막는다)
+
+remote.stop:             # 내 실행 멈추기 (Ctrl+C, 15초 뒤에도 돌면 세션 닫기). 코드 규칙: 매번 승인
+  "*": ask
 
 git.snapshot:
   "*": allow

@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 from rich.cells import cell_len
@@ -175,6 +176,9 @@ class TuiEngine(App):
     def approve(self, call: ToolCall, d: Decision) -> str:   # 작업 스레드에서 불린다
         return self.ui.ask_approval(call, d)
 
+    def notice(self, n) -> None:                  # 배경 감시 스레드에서 불린다 (M5)
+        self.ui.post(self.ui.show_notice, n)
+
 
 # ---------------------------------------------------------------------- 가운데: 카드
 class Lines(Static):
@@ -199,7 +203,9 @@ class TaskCard(Vertical):
 
     def __init__(self, kind: str, title: str):
         super().__init__(classes=f"card {kind}")
-        self.kind = kind                  # task | command | slash | info
+        self.kind = kind                  # task | command | slash | info | notice (서버 실행 알림, M5)
+        self.decision = False             # notice: 결정이 필요한 알림 (NaN, 시간 초과)
+        self.when = ""                    # notice: 알린 시각
         self.title_text = title
         self.started = time.monotonic()
         self.state = "running"            # running | waiting | done | stopped | failed | timeout
@@ -294,6 +300,11 @@ class TaskCard(Vertical):
         return t("tui.k.done_plain", seconds=_secs(self.seconds))
 
     def refresh_kicker(self) -> None:
+        if self.kind == "notice":
+            label = t("tui.k.decide") if self.decision else t("tui.k.notice")
+            self.kicker.update(Text.assemble((label, COBALT if self.decision else WHITE), (" · ", DIM),
+                                             (self.when, FAINT)))
+            return
         label = {"task": t("tui.k.task"), "command": t("tui.k.command"), "slash": t("tui.k.slash"),
                  "info": t("tui.k.info")}[self.kind]
         if self.kind in ("slash", "info"):
@@ -582,7 +593,7 @@ class ChoiceDialog(ModalScreen[str]):
     ]
 
     def __init__(self, kicker: str, headline: str, details: Text | None,
-                 options: list[tuple[str, str, str, tuple[str, ...]]], keys_hint: str):
+                 options: list[tuple[str, str, str, tuple[str, ...]]], keys_hint: str, wide: bool = False):
         """options: (값, 버튼 글, 버튼 종류 decide|plain, 단축키들). 마지막 옵션이 Esc.
         버튼 글 뒤에 첫 단축키를 흐리게 붙인다."""
         super().__init__()
@@ -594,9 +605,10 @@ class ChoiceDialog(ModalScreen[str]):
         self.shortcuts = {key: value for value, _, _, keys in options for key in keys}
         self.opened = time.monotonic()
         self.chosen: str | None = None
+        self.wide = wide                  # 실행 카드처럼 줄이 긴 내용 (상자를 넓게)
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
+        with Vertical(id="dialog", classes="wide" if self.wide else ""):
             yield Static(Text(self.kicker_text, style=COBALT), id="dialog-kicker")
             yield Static(Text(self.headline, style=f"bold {WHITE}"), id="dialog-headline")
             if self.details is not None:
@@ -643,17 +655,33 @@ class ChoiceDialog(ModalScreen[str]):
             self.choose(self.options[-1][0])
 
 
+CARD_STYLES = {"fact": f"bold {WHITE}", "plain": MUTED, "dim": FAINT, "decision": f"bold {COBALT}", "wit": MUTED}
+
+
 def approval_dialog(call: ToolCall, d: Decision) -> ChoiceDialog:
-    details = Text(call.tool, style=f"bold {WHITE}")
-    for key, value in summarize_args(call.args, 300).items():
-        details.append(f"\n  {key}: ", style=FAINT)
-        details.append(str(value), style=MUTED)
+    if call.card:                                  # 실행 카드 (remote.run: GPU·명령·커밋·규칙, M5)
+        details = Text()
+        for i, (style, text) in enumerate(call.card):
+            if i:
+                details.append("\n")
+            details.append(text, style=CARD_STYLES.get(style, MUTED))
+    else:
+        details = Text(call.tool, style=f"bold {WHITE}")
+        for key, value in summarize_args(call.args, 300).items():
+            details.append(f"\n  {key}: ", style=FAINT)
+            details.append(str(value), style=MUTED)
+    if d.key == "policy.remote_run":               # 서버 실행: "이 명령어가 맞습니까?" (M5.2)
+        options = [("once", t("tui.approve.run_yes"), "decide", ("1",)), ("deny", t("tui.approve.run_no"), "plain", ("3",))]
+        hint = t("tui.approve.keys_run")
+        return ChoiceDialog(t("tui.approve.kicker"), localized(d, fallback=d.reason), details, options, hint,
+                            wide=bool(call.card))
     options = [("once", t("tui.approve.once"), "decide", ("1",))]
     if d.grantable:
         options.append(("task", t("tui.approve.task"), "plain", ("2",)))
     options.append(("deny", t("tui.approve.deny"), "plain", ("3",)))
     hint = t("tui.approve.keys") if d.grantable else t("tui.approve.keys13")
-    return ChoiceDialog(t("tui.approve.kicker"), localized(d, fallback=d.reason), details, options, hint)
+    return ChoiceDialog(t("tui.approve.kicker"), localized(d, fallback=d.reason), details, options, hint,
+                        wide=bool(call.card))
 
 
 def undo_dialog(text: str) -> ChoiceDialog:
@@ -726,6 +754,7 @@ class GladosTUI(TextualApp):
     ChoiceDialog {{ align: center middle; background: {VOID} 60%; }}
     #dialog {{ width: 76; max-width: 95%; height: auto; padding: 1 3; background: {SURFACE};
                border: round {COBALT}; }}
+    #dialog.wide {{ width: 104; }}
     #dialog-headline {{ margin-top: 1; }}
     #dialog-details {{ margin-top: 1; background: {PANEL}; padding: 0 1; }}
     #dialog-buttons {{ height: 1; margin-top: 2; }}
@@ -847,6 +876,7 @@ class GladosTUI(TextualApp):
         if self._check:
             self.set_state(t("tui.state.checking"))
             self.check_model_worker()
+        self.engine.watch()                       # 서버 실행 배경 감시 (M5, 서버가 있을 때만)
 
     def relabel(self) -> None:
         """화면 언어가 바뀌면 (/lang) 고정 글을 다시 쓴다."""
@@ -971,6 +1001,27 @@ class GladosTUI(TextualApp):
         self.current = card
         self.main.call_after_refresh(self.main.scroll_end, animate=False)
         return card
+
+    def show_notice(self, n) -> None:
+        """서버 실행 알림 (M5): 가운데에 알림 카드, 오른쪽 아래 토스트, OS 알림. 지금 작업 카드는 그대로."""
+        if self.closing:
+            return
+        if self.home.display:
+            self.home.display = False
+            self.refresh_placeholder()
+            self.refresh_aside()
+        card = TaskCard("notice", "")
+        card.decision = bool(n.decision)
+        card.when = datetime.fromtimestamp(n.ts).strftime("%H:%M")
+        self.main.mount(card)
+        lines = n.lines()
+        card.add(Text(lines[0], style=STYLES["decision" if n.decision else "fact"]))
+        for line in lines[1:]:
+            card.add(Text(line, style=STYLES["dim"]))
+        self.main.call_after_refresh(self.main.scroll_end, animate=False)
+        self.notify(lines[0], title=n.title(), severity="warning" if n.decision else "information",
+                    timeout=20 if n.decision else 8)
+        self.engine.os_notify(n)
 
     def add_line(self, line: Any = "") -> None:
         """엔진이 쓴 글 한 줄. 지금 카드에, 없으면 처음 화면이나 안내 카드에."""

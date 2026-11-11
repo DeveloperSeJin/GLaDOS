@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
@@ -325,8 +325,25 @@ def run_task(
             if same >= limits.same_call_limit:
                 return stop("same_call", step_no, report=True, tool=call.tool, count=same)
 
+            timeout = limits.remote_timeout_s if call.tool.startswith("remote.") else limits.local_timeout_s
+            tool = tools.get(call.tool)
+            if tool is not None and tool.timeout_s > timeout:
+                timeout = tool.timeout_s                         # 오래 걸리는 도구 (fs.inspect: 파일마다 모델에게 물음)
             decision = policy.check(call, ctx)
+            if decision.verdict == "ask" and tool is not None and tool.preview is not None:
+                try:                                             # 승인 카드 (remote.run: GPU·커밋·규칙). 읽기만
+                    call = replace(call, card=tools.preview(call, timeout_s=timeout, cancelled=cancelled))
+                except ToolError as e:                           # 시작할 수 없는 일은 묻지 않고 오류로 돌려준다
+                    errors[call.tool] += 1
+                    result = f"Error: {e}"
+                    emit(Event(ev.OBSERVATION, {"tool": call.tool, "text": result, "key": e.key, "params": e.params}))
+                    record(observation(call.tool, result))
+                    if errors[call.tool] >= limits.tool_error_limit:
+                        return stop("tool_errors", step_no, localized(e), report=True, tool=call.tool, count=errors[call.tool])
+                    continue
             allowed, who, note = _decide(call, decision, ctx, approve)
+            if who == "연구원님:거절" and tool is not None and tool.deny_note:
+                note = tool.deny_note                            # remote.run: "명령이 맞지 않다" -> 무엇을 고칠지 묻기
             audit(call, decision, who)
             emit(Event(ev.DECISION, {
                 "tool": call.tool, "verdict": decision.verdict, "rule": decision.rule,
@@ -343,10 +360,6 @@ def run_task(
                         record(observation(call.tool, result))
                         return stop("denied", step_no, report=True, count=denied)
             else:
-                timeout = limits.remote_timeout_s if call.tool.startswith("remote.") else limits.local_timeout_s
-                tool = tools.get(call.tool)
-                if tool is not None and tool.timeout_s > timeout:
-                    timeout = tool.timeout_s                         # 오래 걸리는 도구 (fs.inspect: 파일마다 모델에게 물음)
                 try:
                     result = _clip(tools.run(call, timeout_s=timeout, cancelled=cancelled), overflow_dir, task_id, step_no)
                 except ToolError as e:

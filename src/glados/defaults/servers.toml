@@ -8,3 +8,4 @@ alias = ""                              # 예: "server-a"
 gpus = 4
 workdir = "/home/saul_park/workspace"   # 내 작업 폴더
 tmux_prefix = "glados-saul_park"        # 실행 세션 이름: <tmux_prefix>-<실험ID>
+projects = "code"                       # 프로젝트 폴더들 (작업 폴더 아래). 폴더 하나가 프로젝트 하나

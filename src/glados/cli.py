@@ -40,7 +40,7 @@ from glados.safety.checkpoint import Checkpoints
 from glados.safety.locations import Places, classify, normalize
 from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 
-LATER = {"/runs": "M5", "/resume": "M6"}
+LATER = {"/resume": "M6"}
 LEVELS = (FULL, CLIPPED, BRIEF, DROPPED)
 STOPS = {"format", "same_call", "tool_errors", "max_steps", "user", "denied"}   # 엔진이 키로 알려 주는 멈춤 이유
 SOURCES_SHOWN = 3        # 화면에 보여 줄 출처 수
@@ -199,6 +199,13 @@ class App:
         self.policy_log = PolicyLog(cfg.home)
         self.memory = Conversation()                      # 이 세션의 대화 (지난 작업을 통째로 기억)
         self.context_chars = limit_chars(cfg.model.num_ctx)
+        self.runner = self.hctx.runner                    # 서버 실행 (M5). 서버가 없으면 None
+        if self.runner is not None:
+            self.runner.on_notice = None                  # 화면이 준비되면 watch()가 붙인다 (그 전 알림은 모아 둠)
+            # 코드를 읽어 메모리를 추정하고 지표 형식을 정하는 모델: 따로 연결 (화면의 멈춤·토큰 표시와 섞이지 않게)
+            self.runner.llm = OllamaClient(cfg.model) if isinstance(self.llm, OllamaClient) else self.llm
+            self.runner.exp_root = Path(self.workspace()) / "experiments"   # 실험 세션 폴더 (표·그래프·요약)
+            self.runner.expire_waiting()                  # 지난 세션의 대기 줄은 취소 (켜져 있는 동안만 기다림)
 
     def system_prompt(self) -> str:
         """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록)."""
@@ -207,7 +214,9 @@ class App:
             osinfo.OS_LABELS[self.os], self.cfg.model.name, tool_names=names,
             shell=shell.shell_label(self.os) if "shell.run" in names else "",
             cwd=self.places.cwd or "",
-            servers=[f"{s.alias} ({s.gpus or '?'} GPUs, work folder {s.workdir or '~'})" for s in self.cfg.servers],
+            servers=[f"{s.alias} ({s.gpus or '?'} GPUs, work folder {s.workdir or '~'}, projects in "
+                     f"{(s.workdir or '~').rstrip('/')}/{s.projects})" for s in self.cfg.servers],
+            runs=self.runner.summary_line() if self.runner is not None else "",
         )
 
     def set_cwd(self, path: str) -> None:
@@ -348,8 +357,15 @@ class App:
     def approve(self, call: ToolCall, d: Decision) -> str:
         s = self.screen
         s.say(s.cobalt(t("approve.title")) + " " + localized(d, fallback=d.reason))
-        s.say(f"  {call.tool} {summarize_args(call.args, 120)}")
-        s.say(t("approve.options_task") if d.grantable else t("approve.options"))
+        if call.card:                                     # 실행 카드 (remote.run: GPU·명령·커밋·규칙)
+            for style, text in call.card:
+                s.say("  " + s.styled(style, text))
+        else:
+            s.say(f"  {call.tool} {summarize_args(call.args, 120)}")
+        if d.key == "policy.remote_run":
+            s.say(t("approve.options_run"))
+        else:
+            s.say(t("approve.options_task") if d.grantable else t("approve.options"))
         while True:
             try:
                 choice = input("> ").strip()
@@ -399,6 +415,9 @@ class App:
         elif cmd == "/servers":
             for line in self.server_lines():
                 s.say(line)
+        elif cmd == "/runs":
+            for line in self.runs_lines():
+                s.say(line)
         elif cmd in LATER:
             s.say(t("command.later", cmd=cmd, stage=LATER[cmd]))
         else:
@@ -439,6 +458,37 @@ class App:
                                busy=c.get("other", 0) + c.get("busy", 0)))
         lines.append(t("servers.hint", alias=servers[0].alias))
         return lines
+
+    def runs_lines(self) -> list[str]:
+        """/runs: 서버 실행 목록 (이 컴퓨터의 기록, 접속하지 않음)."""
+        if self.runner is None:
+            return [t("servers.empty")]
+        return self.runner.runs_lines()
+
+    # ------------------------------------------------------------------ 배경 감시 (M5)
+    def watch(self) -> None:
+        """화면이 열리면 부른다: 알림을 화면으로 받고 배경 감시를 돌린다 (한 줄 실행에서는 부르지 않음)."""
+        if self.runner is None:
+            return
+        self.runner.on_notice = self.notice
+        self.runner.start_watch()
+
+    def notice(self, n) -> None:
+        """배경 감시의 알림 (감시 스레드에서 불린다). 줄 화면은 그대로 찍는다."""
+        s = self.screen
+        lines = n.lines()
+        s.say()
+        s.say(s.cobalt(t("tui.k.decide") if n.decision else t("tui.k.notice")) + "  " + lines[0])
+        for line in lines[1:]:
+            s.say(s.dim(line))
+        self.os_notify(n)
+
+    def os_notify(self, n) -> None:
+        if self.cfg.notify:
+            from glados.notify import os_notify
+
+            lines = n.lines()
+            os_notify(n.title(), " ".join(line.strip() for line in lines), self.os)
 
     def web_note(self) -> str:
         """웹 검색을 쓸 수 있는지 한 줄 (처음 화면)."""
@@ -594,6 +644,7 @@ class App:
         s.say(t("greet.first", home=self.cfg.home) if first_run else t("greet.again"))
         if self.cwd_is_safety():
             s.say(s.dim(t("cwd.safety_note")))
+        self.watch()
         while True:
             try:
                 line = input("> ")
@@ -619,6 +670,10 @@ class App:
 
     def close(self) -> None:
         self.task_log.close()
+        if self.runner is not None:
+            self.runner.stop_watch()                      # 서버의 실행은 그대로 돈다 (tmux)
+            self.runner.on_notice = None
+            self.runner.store.close()
         if self.hctx.hub is not None:
             self.hctx.hub.close()                         # 서버 연결을 닫는다
 

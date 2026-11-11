@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -72,11 +73,14 @@ class FakeServer:
             (bin_ / name).chmod(0o755)
         self.gpu_file = tmp / "gpu.json"
         self.set_gpus(GPUS)
+        self.tmux_dir = tmp / "tmux"                    # 이 시험만의 tmux 서버 (M5 실행 시험)
+        self.tmux_dir.mkdir()
         self.env = {"PATH": f"{bin_}:/usr/bin:/bin", "HOME": str(self.home), "FAKE_GPU": str(self.gpu_file),
-                    "LANG": "C.UTF-8"}
+                    "LANG": "C.UTF-8", "TMUX_TMPDIR": str(self.tmux_dir), "SHELL": "/bin/bash"}
         self.host_key = asyncssh.generate_private_key("ssh-ed25519")
         self.client_key = asyncssh.generate_private_key("ssh-ed25519")
         self.commands: list[str] = []
+        self.scripts: list[str] = []
         self.hubs: list[remote.Hub] = []
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
@@ -93,10 +97,15 @@ class FakeServer:
 
     async def _handle(self, process) -> None:
         self.commands.append(process.command or "")
+        data = None
+        if process.command == "bash -s":                 # 실행 스크립트는 표준 입력으로 온다 (M5)
+            data = (await process.stdin.read()).encode("utf-8")
+            self.scripts.append(data.decode("utf-8"))
         proc = await asyncio.create_subprocess_exec("bash", "-c", process.command or "", cwd=str(self.home),
                                                     env=self.env, stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.PIPE)
-        out, err = await proc.communicate()
+                                                    stderr=asyncio.subprocess.PIPE,
+                                                    stdin=asyncio.subprocess.PIPE if data is not None else None)
+        out, err = await proc.communicate(data)
         process.stdout.write(out.decode("utf-8", "replace"))
         process.stderr.write(err.decode("utf-8", "replace"))
         process.exit(proc.returncode or 0)
@@ -113,9 +122,14 @@ class FakeServer:
         self.hubs.append(hub)
         return hub
 
+    def tmux(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["tmux", *args], env={**self.env, "PATH": "/usr/bin:/bin"}, capture_output=True,
+                              text=True)
+
     def close(self) -> None:
         for hub in self.hubs:                           # 클라이언트 연결부터 닫는다
             hub.close()
+        self.tmux("kill-server")                        # 시험이 띄운 실행이 남지 않게
 
         async def stop() -> None:                       # 서버는 자기 이벤트 루프에서 닫는다 (스레드가 다름)
             self.server.close()
@@ -318,7 +332,8 @@ def test_servers_command_and_prompt(srv, tmp_path, monkeypatch):
     try:
         assert {"remote.gpu", "remote.log", "remote.exec"} <= set(a.tools.names())
         prompt = a.system_prompt()
-        assert f"Servers (shared GPU servers over SSH): server-a (4 GPUs, work folder {srv.work})" in prompt
+        assert (f"Servers (shared GPU servers over SSH): server-a (4 GPUs, work folder {srv.work}, projects in "
+                f"{srv.work}/code)") in prompt
         assert "No GPU servers are set up" not in prompt
         a.command("/servers")
         assert "서버 1대" in out.getvalue() and "server-a  연결 안 됨 · GPU 4장" in out.getvalue()

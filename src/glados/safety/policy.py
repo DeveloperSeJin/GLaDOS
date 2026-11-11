@@ -10,12 +10,14 @@
    - 음성 요청은 정해진 도구만
    - GLaDOS 안전장치에 쓰기·삭제 -> 차단 (승인으로도 못 풂)
    - 셸 명령: 관리자 권한은 admin 표시로만 요청 -> 승인 (작업 동안 승인 불가)
-   - 공유 서버 sudo -> 차단
+   - 공유 서버 sudo -> 차단, 프로세스·시스템 명령(kill, reboot ...) -> 차단, 다른 사람 폴더 -> 차단
 2. policy.yaml 층 (기본 -> 연구원님 -> 서버 -> 저장소). 마지막에 맞는 규칙이 이긴다. 아무것도 안 맞으면 차단
 3. 코드 규칙으로 더 보는 도구 (층의 판정이 허용이어도 승인으로 올림, 매번 승인)
    - shell.run: 잇거나 돌리는 명령, 보호 위치, 환경 변수 읽기(API 키가 있을 수 있음)
    - web.search·web.fetch (M3): 밖으로 보낼 글에 개인 정보·이 컴퓨터의 파일 내용(safety/privacy.py),
      읽을 주소가 이 컴퓨터나 내부 네트워크
+   - remote.exec: 지우기·옮기기·덮어쓰기, 백그라운드로 띄우기(nohup, tmux new, & ...), 잇기
+   - remote.run·remote.stop (M5): 매번 승인 (연구원님 결정: 실행마다 묻는다. "이 작업 동안" 없음)
 4. "이 작업 동안" 승인을 받은 규칙이면 ask -> allow
 """
 
@@ -52,11 +54,15 @@ VOICE_TOOLS = {"ask.user", "remote.gpu", "remote.log"}
 
 ADMIN_WORDS = re.compile(r"(^|[\s;&|(])(sudo|pkexec|doas|runas|gsudo)(\s|$)|-verb\s+runas", re.IGNORECASE)
 REMOTE_SUDO = re.compile(r"(^|[\s;&|(`])(sudo|su|doas|pkexec)(\s|$)")
-# 공유 서버에서 프로세스·시스템을 건드리는 명령: M4(읽기)에서는 막는다. 내 프로세스 멈추기는 M5에서 따로
-REMOTE_PROC = re.compile(r"(^|[\s;&|(`])(kill|pkill|killall|reboot|shutdown|halt|poweroff|systemctl|renice)(\s|$)")
+# 공유 서버에서 프로세스·시스템을 건드리는 명령: 막는다. 내 실행 멈추기는 remote.stop으로만 (M5)
+REMOTE_PROC = re.compile(r"(^|[\s;&|(`])(kill|pkill|killall|reboot|shutdown|halt|poweroff|systemctl|renice)(\s|$)"
+                         r"|\btmux\s+(?:\S+\s+)*kill-(?:session|server|window|pane)\b")
 # 다른 사람의 폴더: /home/<다른 사람>, ~<다른 사람>, /root
 OTHERS_PATH = re.compile(r"(?<![\w/.~-])(?:/home/([A-Za-z0-9._-]+)|/root(?![\w.-])|~([A-Za-z0-9._-]+))")
-REMOTE_TOOLS = {"remote.exec", "remote.log"}
+REMOTE_TOOLS = {"remote.exec", "remote.log", "remote.run"}
+# 서버에 오래 도는 작업을 띄우는 명령: 학습은 remote.run으로 (GPU 확인, 기록, 알림). 매번 승인
+REMOTE_BACKGROUND = re.compile(r"(^|[\s;&|(`])(nohup|setsid|disown|screen|at|batch|tmux\s+(?:new|new-session|send|send-keys|neww|new-window|split|split-window))(\s|$)"
+                               r"|(?<![&>|])&(?![&>])")
 # 서버에서 지우거나 옮기거나 덮어쓰는 명령: 매번 승인 (되돌릴 수 없음, "이 작업 동안" 안 됨)
 REMOTE_DESTRUCTIVE = re.compile(r"(^|[\s;&|(`])(rm|rmdir|mv|dd|mkfs\S*|truncate|shred|chmod|chown|git\s+(?:reset|clean|push|checkout))(\s|$)"
                                 r"|>(?!&)")
@@ -79,6 +85,8 @@ WEB_TOOLS: dict[str, str] = {"web.search": "query", "web.fetch": "url"}
 class ToolCall:
     tool: str
     args: dict[str, Any] = field(default_factory=dict)
+    # 승인 상자에 보여 줄 카드 [(모양, 글)]: 승인이 필요할 때 루프가 도구의 preview로 채운다 (remote.run)
+    card: list[tuple[str, str]] = field(default_factory=list, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -137,8 +145,15 @@ class Policy:
             command = str(call.args.get("command", ""))
             if REMOTE_DESTRUCTIVE.search(command):
                 decision = _d("ask", "코드:서버지우기", "policy.remote_destructive", grantable=False)
+            elif REMOTE_BACKGROUND.search(command):
+                decision = _d("ask", "코드:서버실행", "policy.remote_background", grantable=False)
             elif decision.verdict == "allow" and COMPOUND.search(command):
                 decision = _d("ask", "코드:명령잇기", "policy.ask_compound")   # 허용 목록 명령이어도 잇거나 돌리면 승인
+        # 서버 실행과 멈춤은 정책 파일이 allow여도 매번 승인 (실행 카드를 보고 연구원님이 정한다)
+        if call.tool == "remote.run" and decision.verdict != "deny":
+            decision = _d("ask", "코드:서버실행", "policy.remote_run", grantable=False)
+        if call.tool == "remote.stop" and decision.verdict != "deny":
+            decision = _d("ask", "코드:실행멈춤", "policy.remote_stop", grantable=False)
 
         # 셸 명령의 관리자 권한은 정책 파일과 상관없이 항상 승인 (작업 동안 승인 불가)
         if call.tool == "shell.run" and call.args.get("admin") and decision.verdict != "deny":
@@ -177,12 +192,14 @@ class Policy:
             if not args.get("admin") and ADMIN_WORDS.search(command):
                 return _d("deny", "코드:관리자표시", "policy.admin_inline", grantable=False)
 
-        if tool == "remote.exec" and REMOTE_SUDO.search(str(args.get("command", ""))):
+        if tool in ("remote.exec", "remote.run") and REMOTE_SUDO.search(str(args.get("command", ""))):
             return _d("deny", "코드:공유서버", "policy.remote_sudo", grantable=False)
         if tool in REMOTE_TOOLS:
-            text = str(args.get("command" if tool == "remote.exec" else "path", ""))
-            if tool == "remote.exec" and REMOTE_PROC.search(text):
+            text = str(args.get("path" if tool == "remote.log" else "command", ""))
+            if tool in ("remote.exec", "remote.run") and REMOTE_PROC.search(text):
                 return _d("deny", "코드:공유서버", "policy.remote_proc", grantable=False)
+            if tool == "remote.run":
+                text += " " + str(args.get("cwd", ""))
             other = _others_path(text, ctx.remote_user)
             if other:
                 return _d("deny", "코드:남의파일", "policy.remote_others", grantable=False, path=other)

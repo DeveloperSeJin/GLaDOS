@@ -108,10 +108,12 @@ Researcher: LLM 평가 지표 최신 논문 3개 찾아서 요약해줘
 
 REMOTE_RULES = """\
 Servers (shared GPU servers over SSH): {servers}
-- Other people use them: never read their files or look into their processes.
-- "Is a GPU free?": answer with remote.gpu's verdict. Never guess, and never run nvidia-smi yourself.
-- Logs: list the work folder with remote.log, then read a file with remote.log path=<file>.
-- remote.exec runs one short read-only command. Starting or stopping training is not available yet."""
+- Never read other people's files or look into their processes.
+- "Is a GPU free?": answer with remote.gpu's verdict; never guess.
+- Projects: remote.projects lists them or reads one; explain what it does, the entry file, main arguments, defaults.
+- To run: build the full command from the project's files and the Researcher's script and arguments, then remote.run \
+project=<name>. If the Researcher says it is wrong, ask what to change. Never train via remote.exec.
+- "How is EXP-03?" or continuing it: remote.log run=EXP-03. Stop: remote.stop."""
 
 REPLY_NOTE = {
     "en": "Language: the Researcher wrote in English. Write the answer in English.",
@@ -132,6 +134,7 @@ def build_system_prompt(
     shell: str = "",
     cwd: str = "",
     servers: list[str] | tuple[str, ...] = (),
+    runs: str = "",
 ) -> str:
     """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록). 언어 안내는 reply_note()로 따로 (맨 끝에 붙임)."""
     now = now or datetime.now()
@@ -150,6 +153,8 @@ def build_system_prompt(
         layers.append(WEB_RULES)
     if any(n.startswith("remote.") for n in tool_names):
         layers.append(REMOTE_RULES.format(servers="; ".join(servers) or "(none)"))
+        if runs:
+            env += f" {runs}"
     else:
         env += " No GPU servers are set up yet (servers.toml)."
     layers += [EXAMPLES, env]

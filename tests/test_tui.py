@@ -760,3 +760,41 @@ def test_web_search_lights_the_chip_and_lists_what_was_sent(tmp_path, monkeypatc
     finally:
         app.engine.close()
         site.close()
+
+
+def test_run_card_in_approval_box():
+    """서버 실행 (M5): 승인 상자에 인자 대신 실행 카드 (GPU·명령·커밋·규칙), "이 작업 동안"은 없음."""
+    from glados.safety.policy import Decision, ToolCall
+    d = Decision("ask", "코드:서버실행", "서버에서 학습을 시작합니다", grantable=False, key="policy.remote_run")
+    card = [("fact", "EXP-03 · server-a · GPU 1 (빔)"), ("plain", "명령  python train.py"),
+            ("decision", "! 동시 사용 한도를 넘습니다")]
+    box = tui.approval_dialog(ToolCall("remote.run", {"server": "server-a", "command": "python train.py"}, card=card), d)
+    assert box.details.plain == "EXP-03 · server-a · GPU 1 (빔)\n명령  python train.py\n! 동시 사용 한도를 넘습니다"
+    assert [o[0] for o in box.options] == ["once", "deny"]
+
+
+def test_notice_card_does_not_take_over_the_task(tmp_path):
+    """배경 감시 알림 (M5): 알림 카드가 생기고 토스트가 뜨지만, 지금 작업 카드(current)는 그대로."""
+    from glados.hands.runner import Notice
+
+    app = make(tmp_path, FakeLLM([]))
+    sent = []
+    app.engine.os_notify = sent.append
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.current = None
+            app.show_notice(Notice("nan", "EXP-03", "notice.nan", {"run": "EXP-03", "line": "loss nan"}, decision=True))
+            app.show_notice(Notice("done", "EXP-02", "notice.done", {"run": "EXP-02", "server": "server-a",
+                                                                       "code": 0, "elapsed": "2시간 3분"},
+                                   [("notice.last", {"line": "saved best.pt"})]))
+            await pilot.pause(0.05)
+            cards = [c for c in app.query(TaskCard) if c.kind == "notice"]
+            assert len(cards) == 2 and cards[0].decision and not cards[1].decision
+            text = chat_text(app)
+            assert "결정 필요 · " in text and "EXP-03: 손실이 NaN입니다 (loss nan)" in text
+            assert "EXP-02 끝남: server-a, 종료 코드 0, 2시간 3분" in text and "마지막 줄: saved best.pt" in text
+            assert app.current is None and not app.home.display
+            assert len(sent) == 2
+    run(go())
+    app.engine.close()

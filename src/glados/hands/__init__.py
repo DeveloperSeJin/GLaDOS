@@ -45,6 +45,11 @@ class Tool:
     params: dict[str, Any] = field(default_factory=dict)   # 인자 JSON 스키마
     run: Callable[[dict[str, Any]], str] = lambda args: ""
     timeout_s: int = 60
+    # 승인 상자에 보여 줄 카드 [(모양, 글)] (화면 언어). 승인이 필요할 때만 실행 전에 부른다 (remote.run: GPU·커밋·규칙).
+    # 읽기만 해야 한다. 오류를 내면 승인을 묻지 않고 도구 오류로 돌아간다
+    preview: Callable[[dict[str, Any]], list[tuple[str, str]]] | None = None
+    # 연구원님이 승인 상자에서 거절했을 때 모델에게 돌려줄 글 (없으면 기본: 다른 길을 찾거나 그대로 보고)
+    deny_note: str = ""
 
     def signature(self) -> str:
         props = self.params.get("properties", {})
@@ -74,6 +79,7 @@ class HandContext:
     servers: list[Any] = field(default_factory=list)   # config.Server 목록 (servers.toml). 비면 원격 손 없음 (M4)
     hub: Any = None                              # hands.remote.Hub: 서버 연결들 (앱이 끝날 때 닫는다)
     gpu_watch: Any = None                        # safety.fair.GpuWatch: 서버 GPU를 본 기록 (이 세션)
+    runner: Any = None                           # hands.runner.Runner: 서버 실행·대기 줄·배경 감시 (M5)
 
 
 class ToolRegistry:
@@ -105,21 +111,33 @@ class ToolRegistry:
             cancelled: Callable[[], bool] | None = None) -> str:
         """도구를 따로 스레드에서 돌린다 (시간 제한). cancelled가 참이 되면 기다리지 않고 Cancelled를 낸다
         (TUI의 멈춤. 도구 스레드는 결과를 버리고 혼자 끝난다)."""
-        from glados.core.llm import Cancelled
-
         tool = self._tools.get(call.tool)
         if tool is None:
             raise tool_error("tool.unavailable", tool=call.tool)
-        limit = timeout_s or tool.timeout_s
+        return str(self._threaded(call.tool, tool.run, dict(call.args), timeout_s or tool.timeout_s, cancelled))
+
+    def preview(self, call: ToolCall, timeout_s: int | None = None,
+                cancelled: Callable[[], bool] | None = None) -> list[tuple[str, str]]:
+        """승인 상자에 보여 줄 카드 (도구에 preview가 없으면 빈 목록)."""
+        tool = self._tools.get(call.tool)
+        if tool is None or tool.preview is None:
+            return []
+        out = self._threaded(call.tool, tool.preview, dict(call.args), timeout_s or tool.timeout_s, cancelled)
+        return list(out or [])
+
+    def _threaded(self, name: str, fn: Callable[[dict[str, Any]], Any], args: dict[str, Any], limit: int,
+                  cancelled: Callable[[], bool] | None) -> Any:
+        from glados.core.llm import Cancelled
+
         box: dict[str, Any] = {}
 
         def target() -> None:
             try:
-                box["out"] = tool.run(dict(call.args))
+                box["out"] = fn(args)
             except ToolError as e:
                 box["err"] = e
             except Exception as e:  # 도구 안의 모든 실패는 ToolError로
-                box["err"] = tool_error("tool.failed", tool=call.tool, detail=f"{type(e).__name__}: {e}")
+                box["err"] = tool_error("tool.failed", tool=name, detail=f"{type(e).__name__}: {e}")
             except BaseException as e:  # 멈춤(Cancelled): 부른 쪽에서 다시 낸다
                 box["base"] = e
 
@@ -131,12 +149,12 @@ class ToolRegistry:
             if cancelled is not None and cancelled():
                 raise Cancelled()
         if th.is_alive():
-            raise tool_error("tool.timeout", tool=call.tool, seconds=limit)
+            raise tool_error("tool.timeout", tool=name, seconds=limit)
         if "base" in box:
             raise box["base"]
         if "err" in box:
             raise box["err"]
-        return str(box.get("out", ""))
+        return box.get("out", "")
 
 
 def load_hands(os_name: str, hctx: HandContext | None = None) -> ToolRegistry:

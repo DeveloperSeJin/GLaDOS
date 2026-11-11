@@ -19,6 +19,7 @@ num_ctx = 16384
 language = "ko"         # 화면 언어: "ko" 또는 "en". 답은 물은 언어로 한다 (한국어로 물으면 한국어)
 screen = "tui"          # 화면 종류: "tui"(창 전체를 쓰는 화면) 또는 "plain"(줄 화면, 한글 입력이 TUI에서 이상할 때)
 motion = true           # TUI에서 작업 중에 로고의 점이 움직임. 한글 입력이 흔들리면 false
+notify = true           # 서버 실행이 끝나거나 손실이 NaN이면 OS 알림(Windows 알림 센터 등)으로도 알림
 
 [loop]
 max_steps = 12          # 한 작업 최대 루프
