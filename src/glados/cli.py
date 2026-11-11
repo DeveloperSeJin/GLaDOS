@@ -40,7 +40,7 @@ from glados.safety.checkpoint import Checkpoints
 from glados.safety.locations import Places, classify, normalize
 from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 
-LATER = {"/servers": "M4", "/runs": "M5", "/resume": "M6"}
+LATER = {"/runs": "M5", "/resume": "M6"}
 LEVELS = (FULL, CLIPPED, BRIEF, DROPPED)
 STOPS = {"format", "same_call", "tool_errors", "max_steps", "user", "denied"}   # 엔진이 키로 알려 주는 멈춤 이유
 SOURCES_SHOWN = 3        # 화면에 보여 줄 출처 수
@@ -191,8 +191,9 @@ class App:
             glossary=Glossary(self.llm, cfg.home / "cache" / "names-en.json"),   # 이름 속 낱말 -> 영어 (찾기)
             llm=self.llm, model_name=cfg.model.name,                             # fs.inspect가 파일마다 묻는 모델
             web=cfg.web, egress=Egress(cfg.home / "logs" / "egress.jsonl"),     # 웹 손 (M3): 외부 전송 기록
+            servers=list(cfg.servers),                                          # 원격 손 (M4): servers.toml
         )
-        self.translator = Translator(self.llm)            # 모델의 영어 답 -> 연구원님의 언어
+        self.translator = Translator(self.llm, keep=[s.alias for s in cfg.servers])   # 영어 답 -> 연구원님의 언어 (서버 이름은 그대로)
         self.tools = load_hands(self.os, self.hctx)
         self.task_log = TaskLog(cfg.home)
         self.policy_log = PolicyLog(cfg.home)
@@ -206,6 +207,7 @@ class App:
             osinfo.OS_LABELS[self.os], self.cfg.model.name, tool_names=names,
             shell=shell.shell_label(self.os) if "shell.run" in names else "",
             cwd=self.places.cwd or "",
+            servers=[f"{s.alias} ({s.gpus or '?'} GPUs, work folder {s.workdir or '~'})" for s in self.cfg.servers],
         )
 
     def set_cwd(self, path: str) -> None:
@@ -278,7 +280,9 @@ class App:
         self.hctx.task_id = task_id
         lang = reply_language(request, default=i18n.get_language())   # 연구원님이 쓴 언어 (답을 이 언어로 번역)
         ctx = PolicyContext(places=self.places, registered_tools=frozenset(self.tools.names()),
-                            private_names=self.cfg.private_words(), workspace=self.workspace())
+                            private_names=self.cfg.private_words(), workspace=self.workspace(),
+                            remote_user=self.cfg.user_name,
+                            remote_dirs={s.alias: s.workdir for s in self.cfg.servers})
 
         def emit(e: Event) -> None:
             self.task_log.event(task_id, e)
@@ -392,6 +396,9 @@ class App:
         elif cmd == "/sent":
             for line in self.sent_lines():
                 s.say(line)
+        elif cmd == "/servers":
+            for line in self.server_lines():
+                s.say(line)
         elif cmd in LATER:
             s.say(t("command.later", cmd=cmd, stage=LATER[cmd]))
         else:
@@ -411,6 +418,26 @@ class App:
             kind = t("sent.search" if item.tool == "web.search" else "sent.fetch")
             lines.append(f"  {when}  {kind}  {item.host}  {item.what[:100]}")
         lines.append(t("sent.log", path=self.cfg.home / "logs" / "egress.jsonl"))
+        return lines
+
+    def server_lines(self) -> list[str]:
+        """/servers: servers.toml의 서버, 연결 상태, 이 세션에서 마지막으로 본 GPU (네트워크는 쓰지 않음)."""
+        servers = [srv for srv in self.cfg.servers if srv.alias]
+        if not servers:
+            return [t("servers.empty")]
+        hub, watch = self.hctx.hub, self.hctx.gpu_watch
+        lines = [t("servers.head", count=len(servers))]
+        for srv in servers:
+            on = hub is not None and hub.connected(srv.alias)
+            lines.append(t("servers.line", alias=srv.alias, state=t("servers.connected" if on else "servers.idle"),
+                           gpus=srv.gpus or "?", workdir=srv.workdir or "~"))
+            seen = watch.checked.get(srv.alias) if watch is not None else None
+            if seen:
+                c = watch.summary(srv.alias)
+                lines.append(t("servers.seen", time=datetime.fromtimestamp(seen).strftime("%H:%M"),
+                               free=c.get("free", 0), checking=c.get("checking", 0), mine=c.get("mine", 0),
+                               busy=c.get("other", 0) + c.get("busy", 0)))
+        lines.append(t("servers.hint", alias=servers[0].alias))
         return lines
 
     def web_note(self) -> str:
@@ -592,6 +619,8 @@ class App:
 
     def close(self) -> None:
         self.task_log.close()
+        if self.hctx.hub is not None:
+            self.hctx.hub.close()                         # 서버 연결을 닫는다
 
 
 def wants_tui(choice: str, cfg_screen: str) -> bool:

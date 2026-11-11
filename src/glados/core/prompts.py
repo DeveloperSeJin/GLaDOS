@@ -106,6 +106,13 @@ Researcher: LLM 평가 지표 최신 논문 3개 찾아서 요약해줘
 "Summarize each with its URL."], "thought": "Find recent papers first.", "action": {"tool": "web.search", \
 "args": {"query": "LLM evaluation metrics paper", "time_range": "year"}}, "done": false}"""
 
+REMOTE_RULES = """\
+Servers (shared GPU servers over SSH): {servers}
+- Other people use them: never read their files or look into their processes.
+- "Is a GPU free?": answer with remote.gpu's verdict. Never guess, and never run nvidia-smi yourself.
+- Logs: list the work folder with remote.log, then read a file with remote.log path=<file>.
+- remote.exec runs one short read-only command. Starting or stopping training is not available yet."""
+
 REPLY_NOTE = {
     "en": "Language: the Researcher wrote in English. Write the answer in English.",
     "other": ("Language: the Researcher wrote in {language}. Still think and write the answer in English; "
@@ -124,6 +131,7 @@ def build_system_prompt(
     tool_names: list[str] | tuple[str, ...] = (),
     shell: str = "",
     cwd: str = "",
+    servers: list[str] | tuple[str, ...] = (),
 ) -> str:
     """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록). 언어 안내는 reply_note()로 따로 (맨 끝에 붙임)."""
     now = now or datetime.now()
@@ -140,6 +148,10 @@ def build_system_prompt(
         layers.append(SHELL_RULES.format(shell=shell or "the default shell"))
     if any(n.startswith("web.") for n in tool_names):
         layers.append(WEB_RULES)
+    if any(n.startswith("remote.") for n in tool_names):
+        layers.append(REMOTE_RULES.format(servers="; ".join(servers) or "(none)"))
+    else:
+        env += " No GPU servers are set up yet (servers.toml)."
     layers += [EXAMPLES, env]
     return "\n\n".join(layers)
 

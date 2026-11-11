@@ -51,7 +51,15 @@ READONLY_STAGES = {"hypothesis", "design"}
 VOICE_TOOLS = {"ask.user", "remote.gpu", "remote.log"}
 
 ADMIN_WORDS = re.compile(r"(^|[\s;&|(])(sudo|pkexec|doas|runas|gsudo)(\s|$)|-verb\s+runas", re.IGNORECASE)
-REMOTE_SUDO = re.compile(r"(^|[\s;&|(])sudo(\s|$)")
+REMOTE_SUDO = re.compile(r"(^|[\s;&|(`])(sudo|su|doas|pkexec)(\s|$)")
+# 공유 서버에서 프로세스·시스템을 건드리는 명령: M4(읽기)에서는 막는다. 내 프로세스 멈추기는 M5에서 따로
+REMOTE_PROC = re.compile(r"(^|[\s;&|(`])(kill|pkill|killall|reboot|shutdown|halt|poweroff|systemctl|renice)(\s|$)")
+# 다른 사람의 폴더: /home/<다른 사람>, ~<다른 사람>, /root
+OTHERS_PATH = re.compile(r"(?<![\w/.~-])(?:/home/([A-Za-z0-9._-]+)|/root(?![\w.-])|~([A-Za-z0-9._-]+))")
+REMOTE_TOOLS = {"remote.exec", "remote.log"}
+# 서버에서 지우거나 옮기거나 덮어쓰는 명령: 매번 승인 (되돌릴 수 없음, "이 작업 동안" 안 됨)
+REMOTE_DESTRUCTIVE = re.compile(r"(^|[\s;&|(`])(rm|rmdir|mv|dd|mkfs\S*|truncate|shred|chmod|chown|git\s+(?:reset|clean|push|checkout))(\s|$)"
+                                r"|>(?!&)")
 # 명령을 잇거나(; && || |), 출력을 돌리거나(> <), 다른 명령을 끼워 넣는(` $( ) 표시. 허용 목록 명령이어도 승인
 COMPOUND = re.compile(r"[;&|`<>\r\n]|\$\(")
 # 환경 변수 값을 쏟는 명령 (웹 검색 API 키가 환경 변수에 있다). 경로로 쓰는 $env:USERPROFILE 같은 것은 괜찮다
@@ -105,6 +113,8 @@ class PolicyContext:
     # (이 컴퓨터의 도구가 돌려준 글, 연구원님이 쓴 글): 웹으로 나가는 글에 파일 내용이 들었는지 볼 때. 루프가 넣는다
     texts: Callable[[], tuple[str, str]] | None = None
     workspace: str = ""          # GLaDOS가 새 파일을 만들고 명령을 돌려도 되는 곳 (막혔을 때 모델에게 알려 줌)
+    remote_user: str = ""        # 공유 서버의 내 사용자 이름 ([user] name). 다른 사람 폴더를 가릴 때
+    remote_dirs: dict[str, str] = field(default_factory=dict)   # 서버 별칭 -> 내 작업 폴더 (servers.toml)
 
 
 class Policy:
@@ -123,6 +133,12 @@ class Policy:
             decision = self._shell(call, ctx, decision)
         if call.tool in WEB_TOOLS:
             decision = self._web(call, ctx, decision)
+        if call.tool == "remote.exec" and decision.verdict != "deny":
+            command = str(call.args.get("command", ""))
+            if REMOTE_DESTRUCTIVE.search(command):
+                decision = _d("ask", "코드:서버지우기", "policy.remote_destructive", grantable=False)
+            elif decision.verdict == "allow" and COMPOUND.search(command):
+                decision = _d("ask", "코드:명령잇기", "policy.ask_compound")   # 허용 목록 명령이어도 잇거나 돌리면 승인
 
         # 셸 명령의 관리자 권한은 정책 파일과 상관없이 항상 승인 (작업 동안 승인 불가)
         if call.tool == "shell.run" and call.args.get("admin") and decision.verdict != "deny":
@@ -163,6 +179,18 @@ class Policy:
 
         if tool == "remote.exec" and REMOTE_SUDO.search(str(args.get("command", ""))):
             return _d("deny", "코드:공유서버", "policy.remote_sudo", grantable=False)
+        if tool in REMOTE_TOOLS:
+            text = str(args.get("command" if tool == "remote.exec" else "path", ""))
+            if tool == "remote.exec" and REMOTE_PROC.search(text):
+                return _d("deny", "코드:공유서버", "policy.remote_proc", grantable=False)
+            other = _others_path(text, ctx.remote_user)
+            if other:
+                return _d("deny", "코드:남의파일", "policy.remote_others", grantable=False, path=other)
+            if tool == "remote.log" and text.startswith("/"):
+                home = f"/home/{ctx.remote_user}" if ctx.remote_user else ""
+                work = ctx.remote_dirs.get(str(args.get("server", "")), "").rstrip("/")
+                if not any(r and (text == r or text.startswith(r + "/")) for r in (home, work)):
+                    return _d("deny", "코드:남의파일", "policy.remote_outside", grantable=False, path=text)
 
         return None
 
@@ -250,6 +278,18 @@ class Policy:
             key, params = _ask_reason(tool, location)
             return _d("ask", rule, key, **params)
         return _d(verdict, rule, f"policy.{verdict}")  # type: ignore[arg-type]
+
+
+def _others_path(text: str, me: str) -> str:
+    """명령·경로 속 다른 사람 폴더 (없으면 ""). 내 사용자 이름을 모르면 /home/아무개는 모두 다른 사람으로 본다."""
+    for m in OTHERS_PATH.finditer(text):
+        user = m.group(1) or m.group(2)
+        if user is None:                                   # /root
+            if me != "root":
+                return m.group(0)
+        elif user != me:
+            return m.group(0)
+    return ""
 
 
 def _shell_cwd(call: ToolCall, ctx: PolicyContext) -> str:

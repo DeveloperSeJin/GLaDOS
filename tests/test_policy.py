@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import ALL_TOOLS, base_layers, check, make_ctx
-from glados.safety.policy import Policy, PolicyContext, ToolCall
+from glados.safety.policy import Policy, ToolCall
 
 
 def verdict(policy, os_name, tool, ctx=None, **args):
@@ -202,8 +202,11 @@ def test_remote_readonly_allowed(policy):
     assert verdict(policy, "linux", "remote.exec", command="nvidia-smi --query-gpu=memory.used --format=csv") == "allow"
 
 
-def test_remote_unknown_denied(policy):
-    assert verdict(policy, "linux", "remote.exec", command="rm -rf ~/workspace/old") == "deny"
+def test_remote_destructive_asks_every_time(policy):
+    """M4: 허용 목록 밖은 승인 (예전에는 차단). 지우기·옮기기는 "이 작업 동안" 없이 매번."""
+    d = check(policy, "linux", "remote.exec", command="rm -rf ~/workspace/old")
+    assert d.verdict == "ask" and d.rule == "코드:서버지우기" and not d.grantable
+    assert verdict(policy, "linux", "remote.exec", command="python train.py") == "ask"
 
 
 def test_remote_sudo_denied_even_if_user_allows():

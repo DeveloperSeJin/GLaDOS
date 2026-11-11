@@ -191,7 +191,8 @@ def test_bold_and_dim_with_ansi():
 def test_commands(app):
     a, out = app
     assert a.command("/help") is False and "/undo" in out.getvalue()
-    assert a.command("/servers") is False and "M4" in out.getvalue()
+    assert a.command("/servers") is False and "설정된 서버가 없습니다" in out.getvalue()
+    assert a.command("/runs") is False and "M5" in out.getvalue()
     assert a.command("/log") is False and "기록이 없습니다" in out.getvalue()
     assert a.command("/undo") is False and "되돌릴 파일 수정이 없습니다" in out.getvalue()
     assert a.command("/quit") is True

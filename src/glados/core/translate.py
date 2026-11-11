@@ -283,7 +283,7 @@ You are the translator for GLaDOS, a desktop assistant. Translate the values of 
 Rules:
 - Translate faithfully. Do not add, remove, answer, or explain anything.
 - Keep file names, paths, URLs, numbers, code, and commands exactly as written.
-- Keep technical terms (model, metric, and technology names such as BLEU-1, baseline, diffusion, fine-tuning) in English.
+- Keep technical terms (model, metric, and technology names such as BLEU-1, baseline, diffusion, fine-tuning) in English.{names}
 - {style}
 - An empty value stays empty.
 Reply as JSON with the same keys: {{"fact": "...", "wit": "..."}}"""
@@ -294,20 +294,28 @@ TRANSLATE_SCHEMA: dict[str, Any] = {
     "required": ["fact", "wit"],
 }
 RETRY_NOTE = "Your last reply was not written in {language} only. Translate again into {language}."
+NAMES_RULE = "\n- These are names (servers), not words: {names}. Copy them exactly as written; never translate them."
+NAMES_NOTE = "Your last reply changed the names {names}. Translate again and copy them exactly as written."
 
 
 class Translator:
-    """모델의 답(fact, wit)을 다른 언어로. 실패하면 None (부르는 쪽이 원문을 그대로 쓴다)."""
+    """모델의 답(fact, wit)을 다른 언어로. 실패하면 None (부르는 쪽이 원문을 그대로 쓴다).
+    keep: 낱말처럼 보여도 옮기면 안 되는 이름 (서버 별칭 "temp"가 "임시 서버"가 되지 않게).
+    답에 든 이름이 번역에서 빠지면 한 번 다시, 그래도 빠지면 None (틀린 이름보다 영어 원문이 낫다)."""
 
-    def __init__(self, llm: ChatModel):
+    def __init__(self, llm: ChatModel, keep: Iterable[str] = ()):
         self.llm = llm
+        self.keep = [k for k in keep if k.strip()]
 
     def translate(self, fact: str, wit: str, lang: str) -> tuple[str, str] | None:
         if lang not in LANGUAGES:
             return None
         language = LANGUAGES[lang]
+        source = f"{fact} {wit}"
+        names = [n for n in self.keep if re.search(rf"(?<![\w.-]){re.escape(n)}(?![\w-])", source)]
+        rule = NAMES_RULE.format(names=", ".join(names)) if names else ""
         messages = [
-            {"role": "system", "content": TRANSLATE_SYSTEM.format(language=language, style=STYLE[lang])},
+            {"role": "system", "content": TRANSLATE_SYSTEM.format(language=language, style=STYLE[lang], names=rule)},
             {"role": "user", "content": json.dumps({"fact": fact, "wit": wit}, ensure_ascii=False)},
         ]
 
@@ -323,11 +331,15 @@ class Translator:
                 return None
             if not wit.strip():
                 new_wit = ""
-            if new_fact and in_language(f"{new_fact} {new_wit}", lang):
+            said = f"{new_fact} {new_wit}"
+            fluent = bool(new_fact) and in_language(said, lang)
+            lost = [n for n in names if n not in said]
+            if fluent and not lost:
                 return new_fact, new_wit
-            if attempt == 0:               # 다른 언어가 섞였으면 한 번만 다시
+            if attempt == 0:               # 다른 언어가 섞였거나 이름이 바뀌었으면 한 번만 다시
+                note = RETRY_NOTE.format(language=language) if not fluent else NAMES_NOTE.format(names=", ".join(lost))
                 messages = messages + [
                     {"role": "assistant", "content": raw},
-                    {"role": "user", "content": RETRY_NOTE.format(language=language)},
+                    {"role": "user", "content": note},
                 ]
         return None

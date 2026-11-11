@@ -1,5 +1,7 @@
 # 공유 GPU 서버 (M4부터 사용)
 # alias는 ~/.ssh/config의 Host 이름과 같게 적는다. 연결 정보와 키는 ~/.ssh/config와 ssh-agent에서 가져온다.
+# 처음 한 번 터미널에서 `ssh <alias>`로 접속해 서버 키를 받아 둔다 (GLaDOS는 모르는 키를 받지 않음).
+# GLaDOS는 비밀번호·암호 문구를 입력하지 않는다: ssh-agent에 키를 넣거나(ssh-add) 암호 없는 키를 쓴다.
 
 [[server]]
 alias = ""                              # 예: "server-a"

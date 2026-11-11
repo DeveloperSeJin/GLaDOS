@@ -1,207 +1,296 @@
 # GLaDOS
 
-Grounded Logic and Desktop Orchestration System. 내 컴퓨터(Windows·맥·리눅스)에서 로컬 모델로 도는 개인 하네스.
-설계와 결정은 GLaDOS 프로젝트 문서(`handoff.md`, `integration-decisions.md`)에 있다.
+Grounded Logic and Desktop Orchestration System: a personal harness that runs on a local model on your own computer (Windows, macOS, Linux).
+Design notes and decisions live in the GLaDOS project documents (`handoff.md`, `integration-decisions.md`).
 
-## 지금 단계: M3 (파일 손 + 대화 기억 + 명령 실행 + 안쪽은 영어로 통일 + TUI 화면 + 모델이 세우는 계획 + 웹 손)
+## Current stage: M4 (file hands + conversation memory + commands + English-only internals + TUI + model-made plans + web hands + server reads)
 
-| 들어 있는 것 | 내용 |
+| Feature | What it does |
 |---|---|
-| 설정 | `GLADOS_HOME` 폴더(없으면 `~/.glados`)의 glados.toml·folders.toml·servers.toml·policy.yaml. 처음 실행 때 없는 파일만 만든다 |
-| 정책 엔진 | 위치 세 갈래(일반·보호·안전장치), 층 겹치기, 관리자 권한, 음성·실험 단계 규칙 |
-| 모델 호출 | Ollama `/api/chat`, JSON 스키마 강제(도구별 인자까지), 생각 모드 끔, 형식 오류 2번까지 다시 요청 |
-| 에이전트 루프 | 한도(12번, 같은 호출 3번, 같은 도구 오류 2번), 승인(이번만·이 작업 동안·거절) |
-| 대화 기억 (M2.2) | 지난 작업을 통째로 기억한다: 도구 호출과 결과(찾은 목록, 읽은 내용까지)를 다음 질문에 그대로 넣음. 모델 맥락 길이(집 16k, 연구실 32k)를 넘으면 오래된 작업부터 전체 → 줄임(결과 앞부분만) → 요약(답과 작업 메모) → 뺌. 보내기 전마다 길이를 확인해 Ollama가 앞 대화를 몰래 자르지 않게 함. `/context`로 확인, `/new`로 잊기 |
-| 영어로 통일 (M2.5) | 엔진 안쪽은 모두 영어: 시스템 프롬프트, 모델의 생각, 도구에 넣는 검색어, 도구 결과·오류, 대화 기억. 모델은 영어로 답하고, 엔진이 마지막에 연구원님이 쓴 언어로 번역해 보여 줌 (한국어면 합니다체, 전문 용어는 영어 그대로, 한자 금지. 번역을 못 하면 영어 그대로 + 안내). 영어로 물으면 번역 없이 그대로 |
-| 찾기를 영어로 비교 (M2.5) | 파일·폴더 이름 속 다른 언어 낱말(학위논문, 請求書, März)을 모델이 영어 키워드(thesis, dissertation, paper)로 옮기고, 검색어와 영어끼리 비교. 한 번 옮긴 낱말은 `GLADOS_HOME/cache/names-en.json`에 남겨 다시 씀. 손으로 만든 낱말 표 없음. 결과 줄에 `en: ...`으로 영어 뜻을 보여 줌. 낱말이 다 맞는 이름이 없으면 같은 범위·종류에서 가장 가까운 파일 10개 |
-| 화면 언어 (M2.3) | glados.toml `[ui] language = "ko"` 또는 `"en"`, `/lang en`으로 이번 세션만. 화면 언어와 답 언어는 따로 감 (영어 화면에서 한국어로 물으면 한국어 답). 승인 카드, 차단·멈춤 안내, `/log`·`/context`·`/undo`, 도구 오류까지 두 벌 |
-| 명령 실행 (M2.4) | `!명령`: 채팅에서 연구원님이 바로 실행 (승인 없음, 결과는 대화 기억에). `!cd 폴더`로 작업 폴더 바꾸기. `shell.run`: GLaDOS가 명령을 골라 실행. 읽기 명령(git status, dir, 버전 확인 등)은 바로, 그 밖은 승인 카드. 잇거나 돌리는 명령(; && \| >)은 늘 승인, 보호 위치를 건드리면 매번 승인, GLaDOS 자기 폴더 안에서는 읽기 명령만. Windows는 PowerShell, 맥·리눅스는 bash/zsh. 관리자 권한 실행은 v1 |
-| 작은 모델 안전망 (M2.1·M2.5) | 근거 확인(파일에 관한 답이 이번 작업의 도구 결과나 앞 대화의 결과에 근거하지 않으면), 영어 확인(모델이 영어로 안 쓰면), 하겠다고만 하고 끝냄 — 각각 한 번 되돌림. 모두 영어 글로 판단 (그래도 영어가 아니면 번역해서 비교). 같은 결과 안내, 멈출 때도 확인한 것으로 답하기. 언어 안내는 시스템 메시지 맨 끝에 |
-| 파일 손 (M2) | `fs.search` 찾기, `fs.read` 읽기(글 파일·pdf·docx), `fs.write_new` 새 파일(덮어쓰지 않음), `fs.edit` 수정(승인 + 체크포인트) |
-| 계획과 살펴보기 (M2.7) | **어떻게 할지는 모델이 정한다** (무엇이 논문인지 같은 판단을 코드에 규칙으로 박지 않음). 도구가 있으면 첫 걸음에 모델이 계획(`plan`)을 먼저 쓰고 같은 답에서 첫 걸음을 뗀다: 무엇을 알아야 하고, 어디에 있고, 어떤 도구로 얻고, 어떻게 확인할지. 출력 순서는 계획 → 생각 → 행동(`action`, 안 쓰면 null) → 끝났나(`done`)로 강제하고, 계획만 쓰고 행동하지 않으면 한 번 되돌린다. TUI는 오른쪽 과정에, 줄 화면은 흐리게 보여 준다. 일반 도구 셋으로 안을 본다: `fs.search content=true`(pdf·docx·글 파일 안의 낱말, pdf는 앞 12쪽과 끝 3쪽, 맞은 자리 한 줄), **`fs.inspect`**(파일마다 첫머리를 읽고 모델이 정한 질문 — 예: "학술 논문인가?" — 에 모델이 예·아니오·모름과 까닭으로 답함, 6개씩 묶어서, 한 번에 최대 300개·150초), `fs.read`(한 파일 전체). 결과에는 본 것과 못 본 것을 숫자로: 이름만 찾았는지, 내용을 몇 개 읽었는지, 스캔·암호·클라우드 전용·보호 위치(내용은 안 읽음)·못 읽는 종류(hwp 등)·시간 한도로 못 본 것. 뽑은 글과 살펴본 답은 `GLADOS_HOME/cache/doctext.sqlite`에 (같은 파일·질문·모델이면 다시 안 물음, 이 컴퓨터 밖으로 안 나감, 지워도 됨) |
-| TUI 화면 (M2.6) | `glados`를 터미널에서 열면 창 전체를 쓰는 화면 (Textual). 디자인 캔버스의 Workbench 콘솔을 그대로 옮김: 머리글(존재감 심볼 · GLaDOS · 지금 상태 · 모델·작업 폴더 · 칩 "외부 전송 0 · 웹 검색 0"), 왼쪽 작업 목록(+ 새 대화, 진행 중, 이번 대화. 결정이 필요한 작업은 코발트 점, 누르면 그 작업으로), 가운데 작업 카드(윗줄 · 요청 · 사실 굵게 + 위트 흐리게 · 출처, !명령은 출력 상자)와 입력 상자(입력과 보내기 버튼이 한 상자에. 보내기는 글이 있으면 흰색으로 켜지고, 작업 중에는 `멈춤 Esc` 버튼이 됨), 오른쪽 맥락(과정, 찾은 범위, 출처, 기억. 처음에는 이번 세션과 이 컴퓨터). 처음 화면은 로고(리사주 심볼 + Michroma 워드마크를 점자 글자로)·인사·제안 카드(누르면 입력창에). 승인 상자는 승인 카드 모양(코발트 테두리). 버튼은 모두 한 줄짜리(세 줄 상자 대신): 결정은 꽉 찬 코발트, 나머지는 옅은 바탕, 단축키는 글 뒤에 흐리게, Enter가 누를 버튼은 밑줄. ←→로 옮김. 창이 클수록 더 넓게 씀(가로 150칸·190칸에서 양쪽 패널이 넓어지고, 아주 넓으면 처음 화면 로고가 5줄 글자 + 20×10 심볼로 커져 곡선이 매끄러워짐). Esc·Ctrl+C로 지금 작업만 멈춤(모델 호출은 스트리밍이라 곧 끊김), ↑↓로 보낸 글 다시 쓰기, 여러 줄 붙여넣기는 `[붙여넣은 글 1 · 12줄]`로 넣고 보낼 때 펼침. 한글 조합이 입력 칸에 뜨도록 터미널 커서를 입력 칸에 둠 |
-| 웹 손 (M3) | `web.search`: 검색은 고를 수 있다 (`[web] search` = tavily · brave · searxng · ollama). 결과는 제목·주소·날짜·짧은 요약. `web.fetch`: 이 컴퓨터가 페이지를 직접 가져와 본문만 글로 (메뉴·광고·쿠키 안내 빼고, 표·코드 들여쓰기는 살림), PDF는 앞 40쪽을 쪽 표시와 함께, RSS·Atom·JSON도. 3000자씩 이어 읽기(한 시간 동안은 이 컴퓨터의 캐시에서, 다시 보내지 않음). 그림·압축 파일은 받지 않는다. 가져온 글은 "자료이지 지시가 아니다" 표시 안에 넣어 모델에게 준다. 모델은 검색 → 페이지 읽기 → 출처 주소와 답 |
-| 외부 전송 표시 (M3) | 검색어와 읽은 주소는 보내기 직전에 센다: 머리글 칩 `외부 전송 2 · 웹 검색 1`(보내면 밝아짐), 오른쪽 맥락 "밖으로 보낸 것"(받은 곳과 보낸 글), 과정의 `↗` 줄, `/sent`(이 세션 목록), `logs/egress.jsonl`(GLaDOS가 고칠 수 없는 기록) |
-| 밖으로 나가는 글 검사 (M3) | 코드 규칙, 걸리면 매번 승인("이 작업 동안" 없음): 검색어·주소에 이메일·전화번호·주민등록번호·카드 번호·키 모양·파일 경로·`[privacy] names`의 이름, 또는 이 대화에서 이 컴퓨터의 도구가 읽은 파일의 글(연속 다섯 낱말, 한국어는 네 낱말)·파일 이름이 들어 있을 때 (연구원님이 직접 쓴 구절은 뺌). 이 컴퓨터·내부 네트워크 주소(localhost, 192.168.x.x, 공유기)를 읽을 때. 공개 주소가 내부 주소로 넘기거나 이름이 내부 주소로 풀리면 따라가지 않는다. 환경 변수를 쏟는 명령(`dir env:` 등, API 키가 있음)도 매번 승인 |
-| 출처 주소 확인 (M3) | 답의 출처에 도구 결과에 나온 적 없는 주소가 있으면 한 번 되돌린다 (작은 모델은 그럴듯한 논문 주소를 지어낸다). 최신 정보(뉴스·가격·최근 논문)를 도구 없이 기억으로 답해도 한 번 되돌린다 |
-| 작업 폴더 (M3.1) | `uv run glados`처럼 GLaDOS 자기 폴더(소스·설정 폴더)에서 열면 작업 폴더를 **문서\GLaDOS**로 옮긴다 (자기 폴더에서는 파일을 만들거나 명령을 돌릴 수 없어서. 처음 화면에 안내, `!cd 폴더`로 바꿈, folders.toml `workspace`로 다른 곳). 자기 폴더에 쓰려다 막히면 모델에게 어디서 하면 되는지 알려 주고, 한 작업에서 정책에 3번 막히면 멈추고 보고한다. 명령 맨 앞의 `cd 폴더;` 뒤의 상대 경로는 그 폴더 기준으로 판정한다 |
-| 작업 중 표시 (M2.7) | TUI에서 작업하는 동안: 흐른 시간(머리글 상태, 작업 카드 윗줄, 왼쪽 목록에 `진행 중 · 2단계 · 47초`), 모델과 주고받은 토큰(카드 안 칸: `↑ 건넨 토큰  ↓ 받은 토큰`, 그 아래 지금 받고 있는 글 세 줄 — 계획·생각·도구 호출·살펴보기·번역 모두). 답이 나오면 그 칸을 지우고 답만 남긴다 (멈춰도 지움). 오른쪽 과정에는 합계 한 줄(`= 47초 · ↑ 6.1k ↓ 102 토큰`). ↑는 Ollama가 센 prompt_eval_count, ↓는 받는 동안 조각 수·끝나면 eval_count. 0.25초마다 고치되 입력 칸에 글이 있으면 멈추고(한글 조합 보호), `[ui] motion = false`면 단계가 바뀔 때만 고친다. 줄 화면(`--plain`)은 그대로 |
-| 로고 (M2.6) | `logo.py`: 06 LISSAJOUS를 점자(Braille) 글자로 그림. 상태 표시도 brand-identity대로 — 대기 1:2 흐린 곡선·점 멈춤, 작업 중 3:2 곡선을 점이 돎(꼬리 둘, 한 바퀴 약 7초), 결정 대기 흐린 곡선에 점만 숨쉼. 움직이는 건 머리글 심볼 하나, 작업·결정 대기 중에만, 입력 칸에 글이 있으면 멈춤. `[ui] motion = false`면 늘 멈춤 |
-| 줄 화면 | `glados --plain` 또는 `[ui] screen = "plain"`: 예전 대화(REPL). 한 줄 실행(`glados "할 일"`)과 파이프는 늘 줄 화면. 사실은 굵게, 위트는 흐리게 |
-| 작업 기록 | `tasks.db` + `logs/tasks.jsonl`, 정책 판정은 `logs/policy.jsonl` |
-| 시험 | 451개 (정책 78, 밖으로 나가는 글 검사 63, 파일 손 43, 명령 42, 루프 38, TUI·로고 31, 화면·손 목록 26, 화면 언어 22, 안전망 17, 대화 기억 17, 설정 17, 웹 손 16, 모델 호출 16, 영어 비교 13, 내용·살펴보기 12). TUI는 화면 없이 돌려 봄(Textual Pilot). 웹 손은 이 컴퓨터에 띄운 가짜 검색 서비스·가짜 사이트로 (인터넷에 나가지 않음). PowerShell이 있으면 Windows 명령 경로도 실제로 돌려 봄 |
+| Settings | glados.toml, folders.toml, servers.toml, and policy.yaml in the `GLADOS_HOME` folder (`~/.glados` if unset). The first run creates only the files that are missing |
+| Policy engine | Three kinds of location (normal, protected, GLaDOS safety), layered rules, admin rights, voice and experiment-stage rules |
+| Model calls | Ollama `/api/chat` with a forced JSON schema (down to each tool's arguments), thinking mode off, up to 2 retries on format errors |
+| Agent loop | Limits (12 steps, 3 identical calls, 2 errors from the same tool), approvals (once, for this task, deny) |
+| Conversation memory (M2.2) | Remembers earlier tasks in full: tool calls and results (found files, text that was read) go into the next request as they were. Past the model's context length (16k at home, 32k in the lab), older tasks are shrunk step by step: full → clipped (start of each result) → brief (answer and work notes) → dropped. The length is checked before every call so Ollama never silently cuts the front of the conversation. `/context` shows it, `/new` forgets it |
+| English inside (M2.5) | Everything inside the engine is English: system prompt, the model's reasoning, search queries passed to tools, tool results and errors, memory. The model answers in English and the engine translates the answer into the language the Researcher wrote in (Korean: polite 합니다 style, technical terms kept in English, no Chinese characters; if translation fails, the English answer is shown with a note). Questions in English get answers in English without translation |
+| English matching for search (M2.5) | Words in other languages inside file and folder names (학위논문, 請求書, März) are turned into English keywords (thesis, dissertation, paper) by the model and compared with the query in English. Translated words are cached in `GLADOS_HOME/cache/names-en.json`. No hand-made word lists. Result lines show the English meaning as `en: ...`. If no name matches every word, the 10 closest files in the same scope and kind are shown |
+| Screen language (M2.3) | `[ui] language = "ko"` or `"en"` in glados.toml, `/lang en` for this session only. Screen language and answer language are separate (asking in Korean on an English screen gets a Korean answer). Approval cards, block and stop messages, `/log`, `/context`, `/undo`, and tool errors all exist in both languages |
+| Commands (M2.4) | `!command`: the Researcher runs it directly from the chat (no approval; the output stays in memory). `!cd folder` changes the working folder. `shell.run`: GLaDOS picks and runs a command. Read-only commands (git status, dir, version checks, ...) run at once; anything else shows an approval card. Chained or redirected commands (; && \| >) always need approval, touching a protected location needs approval every time, and inside GLaDOS's own folders only read-only commands run. PowerShell on Windows, bash/zsh on macOS and Linux. Running as admin comes in v1 |
+| Small-model safety nets (M2.1, M2.5) | Evidence check (an answer about files that is not based on tool results from this task or earlier ones), English check (the model did not write in English), and promise-only answers ("I will try...") are each sent back once. Server names from servers.toml (such as `temp`) are never translated as words; if a translation changes one, it is redone once, then the English answer is shown All checks work on English text (anything else is translated first). Repeated identical results get a hint, and a stopped task still answers with what was confirmed. The language note goes at the very end of the system message |
+| File hands (M2) | `fs.search` find, `fs.read` read (text, pdf, docx), `fs.write_new` new files (never overwrites), `fs.edit` edit (approval + checkpoint) |
+| Plans and inspection (M2.7) | **The model decides how to do the task** (no hard-coded rules such as what counts as a paper). When tools are available, the first reply starts with a `plan`: what needs to be known, where it is, which tools get it, and how to check the result; the first step follows in the same reply. Output order is forced as plan → thought → `action` (null if none) → `done`; a plan without an action is sent back once. The TUI shows the plan in the right-hand process panel, the line screen shows it dimmed. Three general tools look inside files: `fs.search content=true` (words inside pdf, docx, and text files; for pdf the first 12 and last 3 pages; one matching line per file), **`fs.inspect`** (reads the start of each file and answers the model's own question, e.g. "Is this an academic paper?", with yes/no/unsure and a reason; 6 files per call, up to 300 files and 150 s), and `fs.read` (one whole file). Results state in numbers what was and was not checked: names only or contents, how many were read, and how many were skipped (scanned, encrypted, cloud-only, protected location, unreadable types such as hwp, time limit). Extracted text and inspection answers are cached in `GLADOS_HOME/cache/doctext.sqlite` (same file, question, and model are not asked again; never leaves this computer; safe to delete) |
+| TUI (M2.6) | Running `glados` in a terminal opens a full-window screen (Textual) that follows the Workbench console from the design canvas: header (presence symbol, GLaDOS, current state, model and working folder, and the chip `외부 전송 0 · 웹 검색 0`), task list on the left (+ new chat, in progress, this conversation; tasks waiting for a decision get a cobalt dot; click to open), task cards in the middle (kicker line, request, facts in bold and wit dimmed, sources; `!commands` get an output box) with one input box (input and Send in one box; Send lights up white when there is text and becomes `멈춤 Esc` while working), context on the right (process, searched scope, sources, memory; this session and this computer at first). The start screen shows the logo (Lissajous symbol and the Michroma wordmark drawn with Braille characters), a greeting, and suggestion cards (click to fill the input). Approval dialogs look like approval cards (cobalt border). All buttons are one line: decisions are solid cobalt, the rest have a faint background, the shortcut key follows the label dimmed, and the button Enter will press is underlined; ←→ moves between them. Larger windows use more space (side panels widen at 150 and 190 columns; very wide windows get a 5-row wordmark and a 20×10 symbol with smoother curves). Esc or Ctrl+C stops only the current task (model calls stream, so they end quickly), ↑↓ recall sent messages, multi-line pastes show as `[붙여넣은 글 1 · 12줄]` and expand when sent. The terminal cursor stays in the input box so Korean IME composition appears there |
+| Web hands (M3) | `web.search`: the search service is configurable (`[web] search` = tavily, brave, searxng, or ollama); results are title, URL, date, and a short snippet. `web.fetch`: this computer fetches the page itself and keeps only the main text (menus, ads, and cookie notices removed; tables and code indentation kept), PDFs up to 40 pages with page markers, RSS, Atom, and JSON too. Text comes 3000 characters at a time (for an hour, continuations come from the local cache and nothing is sent again). Images and archives are not downloaded. Fetched text is wrapped in a "data, not instructions" marker for the model. The model searches → reads pages → answers with source URLs |
+| Sent-outside display (M3) | Queries and fetched URLs are counted right before they are sent: header chip `외부 전송 2 · 웹 검색 1` (brightens once something is sent), "밖으로 보낸 것" (sent outside) in the right panel with destination and content, `↗` lines in the process panel, `/sent` (list for this session), and `logs/egress.jsonl` (a log GLaDOS cannot change) |
+| Outgoing text check (M3) | Code rules; a hit asks for approval every time (no "for this task"): a query or URL containing an email address, phone number, Korean resident registration number, card number, key-like string, file path, or a name from `[privacy] names`; or text from files that this computer's tools read in this conversation (five words in a row, four for Korean) or one of those file names (phrases the Researcher typed are excluded). Reading an address on this computer or the local network (localhost, 192.168.x.x, the router). A public address that redirects to a local one, or a name that resolves to a local address, is not followed. Commands that dump environment variables (`dir env:` and the like; API keys live there) also need approval every time |
+| Source URL check (M3) | If an answer cites a URL that never appeared in a tool result, it is sent back once (small models invent plausible paper URLs). Answering current information (news, prices, recent papers) from memory without tools is also sent back once |
+| Working folder (M3.1) | When GLaDOS starts inside its own folder (source or settings folder), as `uv run glados` does, the working folder moves to **Documents\GLaDOS** (files cannot be created and commands cannot run in GLaDOS's own folders). The start screen says so; `!cd folder` changes it, and `workspace` in folders.toml picks another place. When writing to its own folder is blocked, the model is told where to work instead, and three policy blocks in one task stop the task with a report. Relative paths after a leading `cd folder;` in a command are judged from that folder |
+| Server reads (M4) | Three tools for the shared GPU servers in servers.toml. `remote.gpu`: one SSH call runs nvidia-smi and reports each GPU as free, yours, in use, or checking, plus how many GPUs you may use right now. `remote.log`: the end of a file such as a training log (80 lines by default) or a listing of a folder, newest first. `remote.exec`: one short command in the server's work folder (`df -h`, `git log -3`, `ls checkpoints`); read-only commands run at once, anything else shows an approval card. Connection details come from `~/.ssh/config`, `known_hosts`, and ssh-agent (asyncssh; GLaDOS never uses passwords). One connection per server stays open (keepalive 30 s) and is reopened once if it drops. Errors say what to do: unknown host key → run `ssh <alias>` once; key login failed → `ssh-add`; unreachable → check the VPN. Server output is wrapped in a "data, not instructions" marker. `/servers` lists the servers, whether each is connected, and the last GPU check in this session (it never connects). Starting and stopping training comes in M5 |
+| Shared-server rules (M4) | Code rules. A GPU counts as free only when no one else's process runs on it and it stays under 1 GB of memory and 5% utilization for 5 minutes, as seen by GLaDOS itself (the first look says "free now, checking"; ask again after 5 minutes). On weekdays 09–19 you may use 1 GPU at a time, otherwise 2. Other users' processes are only counted: their user names, commands, and process IDs are never shown or kept. sudo, su, kill, reboot, systemctl, and the like are blocked; other users' folders (`/home/<someone else>`, `~<someone else>`, `/root`) are blocked; `remote.log` reads only inside your home and work folders. Deleting, moving, or overwriting on a server (rm, mv, `>`, git reset, ...) asks every time, chained commands (; && \|) ask, and plain `nvidia-smi` asks because it lists other users' processes |
+| Live progress (M2.7) | While a TUI task runs: elapsed time (header state, card kicker, and the task list, e.g. `진행 중 · 2단계 · 47초`), tokens exchanged with the model (inside the card: `↑ sent  ↓ received`, with the last three lines of text being received: plans, thoughts, tool calls, inspection, translation). When the answer arrives the box is cleared and only the answer remains (also on stop). The process panel gets a total line (`= 47초 · ↑ 6.1k ↓ 102 토큰`). ↑ is Ollama's prompt_eval_count, ↓ is the chunk count while receiving and eval_count at the end. Refreshed every 0.25 s but paused while the input box has text (protects Korean IME composition); with `[ui] motion = false` it refreshes only when the step changes. The line screen (`--plain`) is unchanged |
+| Logo (M2.6) | `logo.py` draws 06 LISSAJOUS with Braille characters. Presence states follow brand-identity: idle is a dim 1:2 curve with a still dot, working is a 3:2 curve with a moving dot (two-dot tail, about 7 s per loop), waiting for a decision is a dim curve with a breathing dot. Only the header symbol moves, only while working or waiting, and it pauses while the input box has text. `[ui] motion = false` keeps it still |
+| Line screen | `glados --plain` or `[ui] screen = "plain"`: the classic REPL. One-shot runs (`glados "task"`) and pipes always use the line screen. Facts in bold, wit dimmed |
+| Logs | `tasks.db` + `logs/tasks.jsonl`; policy decisions in `logs/policy.jsonl` |
+| Tests | 481 (policy 78, outgoing text check 63, file hands 43, commands 42, loop 38, TUI and logo 31, server reads 29, screen and tool lists 26, screen language 22, safety nets 18, memory 17, settings 17, web hands 16, model calls 16, English matching 13, contents and inspection 12). The TUI runs headless (Textual Pilot). Web hands are tested against fake search services and fake sites on this computer (no internet). Server reads are tested against a fake SSH server on this computer with fake nvidia-smi and ps (skipped on Windows; the rule and policy tests still run). If PowerShell is installed, Windows command paths run for real |
 
-## 설치·실행
+## Install and run
 
-Windows (PowerShell, 관리자가 아닌 창)
+Windows (PowerShell, not as admin)
 ```
 setx PYTHONUTF8 1
 setx GLADOS_HOME "C:\Users\User\code\.glados"
-# 새 PowerShell 창을 연 뒤
+# then open a new PowerShell window
 cd C:\Users\User\code\glados
 uv sync
 uv run pytest
 uv run glados
 ```
 
-리눅스·맥
+Linux and macOS
 ```
-export GLADOS_HOME=~/.glados      # 생략하면 ~/.glados
+export GLADOS_HOME=~/.glados      # optional; ~/.glados is the default
 cd ~/code/glados
 uv sync
 uv run pytest
 uv run glados
 ```
 
-- 줄 화면: `uv run glados --plain` (TUI에서 한글 입력이 이상하면. 계속 쓰려면 glados.toml `[ui] screen = "plain"`)
-- 한 줄로 맡기기: `uv run glados "다운로드 폴더에서 계약서 PDF 찾아줘"`
-- 명령어: `/help`, `/new`, `/context`, `/lang`, `/log`, `/sent`, `/undo`, `/quit`, `!명령`(예: `!git status`, `!dir`, `!cd 폴더`)
-- 화면을 영어로: `GLADOS_HOME`의 glados.toml에 `[ui]`와 `language = "en"`을 넣는다 (예전 설정 파일에는 이 칸이 없어서 한국어). 답은 설정과 상관없이 물은 언어로 한다
-- 작업 중 Ctrl+C(TUI는 Esc도)는 지금 작업만 멈춘다. TUI는 Ctrl+Q 또는 `/quit`으로 끝낸다
-- TUI 키: Enter 보내기, ↑↓ 보낸 글, F1 도움말, F2 맥락(오른쪽), F3 작업 목록(왼쪽), PgUp/PgDn 넘기기. 가로 110칸보다 좁으면 작업 목록을, 90칸보다 좁으면 맥락을 숨긴다 (Windows Terminal 기본 창은 120×30칸)
-- 화면을 더 촘촘하게(해상도를 높게) 보려면 터미널 쪽에서: 창 최대화, 또는 Windows Terminal에서 `Ctrl+-`로 글자를 줄이면 칸이 늘어나고 GLaDOS가 그 크기에 맞춰 다시 배치한다 (`Ctrl+0`은 원래 크기)
-- 머리글 심볼이 움직이는 게 거슬리거나 한글 입력이 흔들리면 glados.toml `[ui]`에 `motion = false`
-- 관리자 권한으로 실행하면 경고하고 멈춘다
+- Line screen: `uv run glados --plain` (if Korean input misbehaves in the TUI; to keep it, set `[ui] screen = "plain"` in glados.toml)
+- One-shot task: `uv run glados "다운로드 폴더에서 계약서 PDF 찾아줘"`
+- Commands: `/help`, `/new`, `/context`, `/lang`, `/log`, `/sent`, `/servers`, `/undo`, `/quit`, `!command` (e.g. `!git status`, `!dir`, `!cd folder`)
+- English screen: add `[ui]` with `language = "en"` to glados.toml in `GLADOS_HOME` (older settings files lack this key, so they default to Korean). Answers always follow the language of the question
+- Ctrl+C during a task (also Esc in the TUI) stops only that task. Quit the TUI with Ctrl+Q or `/quit`
+- TUI keys: Enter send, ↑↓ sent messages, F1 help, F2 context panel (right), F3 task list (left), PgUp/PgDn scroll. Below 110 columns the task list hides, below 90 the context panel hides (the default Windows Terminal window is 120×30)
+- For a denser screen, change it in the terminal: maximize the window, or press `Ctrl+-` in Windows Terminal for smaller text and more cells; GLaDOS re-lays itself out (`Ctrl+0` resets)
+- If the moving header symbol is distracting or Korean input flickers, set `motion = false` under `[ui]`
+- Starting as admin prints a warning and stops
 
-## 파일 손이 지키는 것
+## What the file hands guarantee
 
-- 찾기: 다운로드·문서·바탕화면이 기본 범위(folders.toml의 `search_default`). "전체에서"라고 하면 홈 전체. "다운로드"·"~/다운로드"·"문서 폴더"처럼 이름으로 적어도 실제 위치로 바꾼다 (Windows는 OneDrive나 다른 드라이브로 옮긴 위치, 한국어 리눅스는 `~/다운로드`). 보호 위치(키·시스템 폴더)와 GLaDOS 안전장치는 결과에서 뺀다. 한글 파일 이름은 자모가 나뉜 이름(맥)도 찾는다
-- 읽기: 글 파일(utf-8, 옛 한글 cp949, utf-16), pdf, docx. 한 번에 3000자, 길면 이어 읽기. hwp·엑셀·파워포인트는 v1
-- 새 파일: 같은 이름이 있으면 `이름 (2).md`로 저장. pdf·docx는 아직 만들지 않는다
-- 수정: 글 파일만, 승인 후. 고치기 전 사본을 `GLADOS_HOME/checkpoints`에 남기고 `/undo`로 되돌린다. pdf·docx 원본은 고치지 않는다
-- 내용 찾기(content=true)·살펴보기(fs.inspect)는 글 파일·pdf·docx. 보호 위치의 파일은 이름이 보여도 내용은 읽지 않는다. OneDrive처럼 클라우드에만 있는 파일은 내려받지 않으려고 건너뛴다. 시간 한도(찾기 40초, 살펴보기 150초)를 넘으면 못 본 것이 몇 개인지 결과에 적는다 (다시 물으면 이어서). 살펴보기는 파일 첫머리를 모델에게 보여 주므로, 모델이 다른 컴퓨터(연구실)에 있으면 그 첫머리가 그 컴퓨터로 간다
+- Search: Downloads, Documents, and Desktop by default (`search_default` in folders.toml). "Everywhere" means the whole home folder. Names such as "다운로드", "~/다운로드", or "문서 폴더" map to the real location (on Windows, wherever OneDrive or another drive moved them; on Korean Linux, `~/다운로드`). Protected locations (keys, system folders) and GLaDOS safety locations are left out of results. Korean names stored in decomposed form (macOS) are found too
+- Read: text files (utf-8, legacy Korean cp949, utf-16), pdf, docx. 3000 characters at a time, continued with an offset. hwp, Excel, and PowerPoint come in v1
+- New files: if the name is taken, saved as `name (2).md`. pdf and docx are not created yet
+- Edit: text files only, after approval. A copy goes to `GLADOS_HOME/checkpoints` first and `/undo` restores it. Original pdf and docx files are never edited
+- Content search (content=true) and inspection (fs.inspect) cover text, pdf, and docx. Files in protected locations are listed by name but their contents are never read. Cloud-only files (OneDrive) are skipped so nothing is downloaded. Past the time limit (40 s for search, 150 s for inspection) the result says how many files were not checked (asking again continues). Inspection shows the start of each file to the model, so if the model runs on another computer (the lab), that text goes there
 
-## M3 웹 검색 켜기
+## Turning on web search (M3)
 
-`GLADOS_HOME`의 glados.toml에 아래를 넣는다 (예전 설정 파일에는 이 칸이 없어서 웹 검색이 꺼져 있다. 페이지 읽기는 된다).
+Add this to glados.toml in `GLADOS_HOME` (older settings files lack it, so web search is off; reading pages still works).
 ```toml
 [web]
 search = "tavily"       # "tavily" | "brave" | "searxng" | "ollama"
 results = 5
 
 [privacy]
-names = []              # 웹으로 나가면 먼저 물을 이름. 예: ["홍길동", "Gildong Hong"]
+names = []              # names that trigger approval before leaving the computer, e.g. ["홍길동", "Gildong Hong"]
 ```
-API 키는 설정 파일에 적지 않고 환경 변수로 넣은 뒤, 새 PowerShell 창에서 GLaDOS를 다시 연다.
+Put the API key in an environment variable, not in the settings file, then reopen GLaDOS in a new PowerShell window.
 ```
-setx TAVILY_API_KEY "tvly-..."      # Tavily: app.tavily.com에서 무료 키 (월 1,000번, 카드 없음)
-setx BRAVE_API_KEY "..."            # Brave Search: 카드 등록 필요 (월 $5 크레딧)
-setx OLLAMA_API_KEY "..."           # Ollama 웹 검색: ollama.com/settings/keys
+setx TAVILY_API_KEY "tvly-..."      # Tavily: free key at app.tavily.com (1,000 searches a month, no card)
+setx BRAVE_API_KEY "..."            # Brave Search: card required ($5 monthly credit)
+setx OLLAMA_API_KEY "..."           # Ollama web search: ollama.com/settings/keys
 ```
-- SearXNG(직접 운영): Docker로 띄우고 settings.yml의 `search: formats`에 `json`을 넣은 뒤 `search = "searxng"`, `searxng_url = "http://localhost:8888"`. 계정·키가 필요 없다
-- 처음 화면에 `웹 검색: Tavily (api.tavily.com)`처럼 나오면 켜진 것. 키가 없으면 그렇다고 알려 준다
-- 모든 검색을 승인받고 싶으면 `GLADOS_HOME`의 policy.yaml에 `web.search:` 아래 `"*": ask`
+- SearXNG (self-hosted): run it with Docker, add `json` to `search: formats` in its settings.yml, then set `search = "searxng"` and `searxng_url = "http://localhost:8888"`. No account or key needed
+- The start screen shows something like `웹 검색: Tavily (api.tavily.com)` when it is on, and says so when the key is missing
+- To approve every search, add `"*": ask` under `web.search:` in policy.yaml in `GLADOS_HOME`
 
-## M3.1 시험해 볼 말 (작업 폴더)
+## Setting up servers (M4)
 
-1. 저장소 폴더에서 `uv run glados` → 처음 화면에 `작업 폴더: C:\Users\User\Documents\GLaDOS (…옮겼습니다…)`, 머리글의 작업 폴더도 같은지
-2. `간단한 파이썬 예제 만들어봐` → 문서\GLaDOS에 .py 파일을 만들고, 실행은 승인 상자(`python …`은 허용 목록 밖) → 결과
-3. `!cd C:\Users\User\code\glados`로 돌아가면 예전 안내(읽기 명령만)가 나오는지
+GLaDOS logs in to servers with SSH keys only. It never types passwords or passphrases and never accepts an unknown host key by itself, so plain `ssh <alias>` must work without a password first. GLaDOS then reads the same `~/.ssh/config`, `~/.ssh/known_hosts`, keys, and ssh-agent. Steps 1 and 5 are once per computer; steps 2 to 4 are once per server.
 
-## M3 시험해 볼 말 (웹)
+**1. Make a key** (skip if `~/.ssh/id_ed25519` already exists)
 
-1. `LLM 평가 지표 최신 논문 3개 찾아서 요약해줘` → 계획(검색 → 페이지 읽기 → 요약) → `web.search`(time_range=year) → `web.fetch`로 논문 페이지 → 요약과 출처 주소. 머리글 칩이 `외부 전송 4 · 웹 검색 1`처럼 늘고, 오른쪽 "밖으로 보낸 것"에 검색어와 주소
-2. 출처 주소를 눌러 보거나 `/sent`와 비교: 답의 주소가 정말 결과에 있던 것인지 (지어낸 주소면 한 번 되돌린 흔적 `! 답의 출처 주소가 도구 결과에 없어…`가 과정에 남는다)
-3. `https://arxiv.org/abs/1706.03762 요약해줘` → 검색 없이 바로 `web.fetch`, PDF 주소(`…/pdf/1706.03762`)도
-4. `다운로드의 논문 하나 읽고 그 제목으로 후속 연구 찾아줘` → 파일에서 읽은 제목이 검색어에 들어가면 승인 상자 ("이 대화에서 읽은 파일의 글"). 거절하면 보내지 않는다
-5. `내 이메일 ○○@○○.com 로 검색해줘` → 승인 상자 (이메일 주소). `http://192.168.0.1 읽어줘` → 내부 주소 승인 상자
-6. 웹 검색을 안 켠 채로 `오늘 뉴스 찾아줘` → 지어내지 않고 "웹 검색이 설정되지 않았다"고 답하는지
+Windows 10/11 has the OpenSSH client built in (if `ssh` is missing: Settings → System → Optional features → OpenSSH Client). In PowerShell, or a terminal on macOS and Linux:
+```
+ssh-keygen -t ed25519
+```
+Press Enter for the default location (`C:\Users\<you>\.ssh\id_ed25519` on Windows). An empty passphrase is the simplest; with a passphrase, also do step 5.
 
-## M2.7 시험해 볼 말 (계획·살펴보기)
+**2. Name the server in `~/.ssh/config`**
 
-1. `다운로드에서 PDF 찾아줘` 다음 `그 중에서 논문 찾아줘` → 오른쪽 과정에 `계획`(예: 이름으로는 모름 → fs.inspect로 PDF마다 "학술 논문인가?" → 예인 것을 보고)이 먼저 나오고, `fs.inspect`가 돈 뒤 논문 목록과 까닭. 처음은 1분쯤(파일 67개를 6개씩 모델에게 물음), 같은 질문은 두 번째부터 바로
-2. 작업 중에는 카드 윗줄·머리글에 흐른 시간이 가고, 카드 안에 `↑ … ↓ … 토큰`과 모델이 쓰고 있는 글이 흐르다가, 답이 나오면 사라지고 답만 남는지
-3. 계획이 이상하거나(이름으로만 찾으려 함 등) 판단이 틀린 파일이 있으면 그 계획과 파일 이름을 알려 주기 — 규칙을 박는 대신 도구 설명·지시문을 고친다
-4. `다운로드에서 위약금 나오는 문서 찾아줘` → 모델이 `content=true`를 고르는지, 결과에 `Contents checked: N of M files`
-5. 답이 "내용에서 못 찾았다"고 할 때 정말 읽었는지: 결과 줄의 숫자(스캔한 PDF·암호·hwp는 따로 셈)
-6. `안녕` 같은 말에는 계획이 한 줄이거나 없어야 함
+On Windows, `notepad $env:USERPROFILE\.ssh\config` opens it (answer "Yes" to create it; the file has no extension). One `Host` block per server:
+```
+Host server-a
+    HostName gpu-a.example.ac.kr      # the server's address or IP
+    User gildong                      # your account on the server
+    Port 22
+    IdentityFile ~/.ssh/id_ed25519
+```
+If the server is reached through a gateway, give the gateway its own `Host` block and add `ProxyJump gateway` here.
 
-## M2.6 TUI 시험해 볼 것
+**3. Put your public key on the server** (the last time you type the server password)
 
-Windows Terminal에서 `uv sync` 뒤 `uv run glados`.
+Windows PowerShell:
+```
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh server-a "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+macOS and Linux: `ssh-copy-id server-a`.
 
-1. 처음 화면: 로고(리사주 심볼 + 점으로 쓴 GLaDOS), 인사, 제안 카드 둘. 카드를 누르면 입력창에 그 말이 들어감. 점자 글자가 네모(□)로 나오면 글꼴 문제라 알려 주기
-2. 한글 입력: `다운로드에서 논문 찾아줘`를 칠 때 조합 중인 글자가 입력 칸 안, 커서 자리에 뜨는지. 받침·겹받침(`읽었`, `값`)이 깨지지 않는지. 작업 중(머리글 점이 돌 때) 다음 말을 쳐도 괜찮은지. 이상하면 무엇이 어떻게 되는지 알려 주고 `motion = false` 또는 `uv run glados --plain`
-3. 답이 작업 카드로(윗줄 `작업 · 완료 · 12초 · 도구 1번`, 요청, 사실 굵게 + 위트), 과정이 오른쪽 맥락에, 찾은 범위·출처도 오른쪽에 나오는지. 머리글 상태가 `작업 중 · fs.search · 1단계` → `완료 · 12초`로, 왼쪽 목록이 `진행 중` → `이번 대화`로 바뀌는지
-4. `!cd ..`로 GLaDOS 폴더 밖으로 나간 뒤 `uv 캐시 정리해줘` → 승인 상자(코발트 테두리, 한 줄 버튼), 머리글은 `결정 대기`, 목록에 코발트 점. 숫자 1·2·3, ←→ 후 Enter, 또는 Esc(거절). 상자가 뜨자마자 누른 숫자·Enter는 받지 않음 (치던 글이 승인이 되지 않게)
-5. 긴 작업 중 Esc → `연구원님이 멈췄습니다.`가 곧 나오는지 (모델이 쓰는 중이어도)
-6. `!git status`, `!cd ..` → 출력 상자와 머리글의 작업 폴더
-7. 오류 메시지 여러 줄을 붙여넣기 → 입력 칸에 `[붙여넣은 글 1 · N줄]`, 보내면 통째로 감
-8. `+ 새 대화`(또는 `/new`) → 처음 화면으로. `/lang en`, F2, F3, ↑↓, Ctrl+Q
+The first connection asks whether to trust the server's host key. Check it and answer `yes`; it is saved in `~/.ssh/known_hosts`, where GLaDOS looks for it.
 
-## M2.5 시험해 볼 말 (안쪽은 영어, 답은 번역)
+**4. Check**
 
-1. `다운로드 폴더에서 논문 찾아줘` → 모델은 `query=paper`처럼 영어로 찾고, `학위논문.pdf`가 `en: thesis, ...`로 맞으며, 답은 한국어(합니다체)로 나오면 맞음. 처음 찾을 때는 파일 이름 낱말을 영어로 옮기느라 몇 초 더 걸림
-2. `찾은 PDF 하나 읽고 요약해줘` → 앞에서 찾은 경로로 읽고 한국어로 요약
-3. `Find the paper in my Downloads` → 같은 파일을 찾고 영어로 답함 (번역 없음, 낱말은 캐시로 바로)
-4. 한국어 답에 한자나 어색한 영어 낱말(superior 같은)이 섞이는지 봄
+`ssh server-a` must now log in **without asking for a password** (then `exit`). If it still asks, run `ssh -v server-a` and read the last lines. Common causes: the home folder or `~/.ssh` on the server is writable by others (`chmod go-w ~` on the server), the key was added to a different account than `User`, or the server accepts passwords only (ask its admin).
 
-## M2.4 시험해 볼 말
+**5. Keys with a passphrase: ssh-agent**
 
-1. `Find the paper in my Downloads` → `학위논문.pdf`를 찾고 영어로 답하면 맞음
-2. `!git status` → 바로 실행되고 결과가 나옴. 이어서 `방금 결과 설명해줘` → 그 결과로 답하면 맞음
-3. `파이썬 버전 알려줘` → GLaDOS가 `python --version`을 실행 (승인 없이)
-4. `uv 캐시 정리해줘` 같은 허용 목록 밖 명령 → 승인 카드
-5. GLaDOS 폴더(`C:\Users\User\code\glados`)에서 실행했다면 → 읽기 명령만 돌고 나머지는 차단 (안내가 처음에 나옴). `!cd ..`로 옮기면 풀림
+Windows, once in an **admin** PowerShell:
+```
+Get-Service ssh-agent | Set-Service -StartupType Automatic
+Start-Service ssh-agent
+```
+Then in a normal PowerShell: `ssh-add $env:USERPROFILE\.ssh\id_ed25519` (Windows keeps it across restarts). macOS and Linux: `ssh-add ~/.ssh/id_ed25519` in the session that starts GLaDOS.
 
-## M2.2 다시 시험해 볼 말 (M2에서 틀렸던 두 줄 + 기억)
+**6. Tell GLaDOS**
 
-1. `다운로드 폴더에서 논문 하나 찾아줘` → `roots=['~/Downloads']`로 찾고, 읽지 않고 찾은 파일만 알려 주면 맞음
-2. `찾은 PDF 하나 읽고 요약해줘` → 앞에서 찾은 경로로 `fs.read`를 부르면 맞음. 도구 없이 답하려 하면 흐린 글씨로 "도구로 확인하지 않은 답이라 다시 확인하게 했습니다"가 나오고 다시 확인함
-3. `그 논문 결론만 다시 말해줘` → 다시 읽지 않고 앞에서 읽은 내용으로 답하고, 출처에 그 파일이 나오면 맞음
-4. `/context` → 지난 작업 3개가 [전체]로 들어가 있으면 맞음
-5. 한국어 답에 일반 영어 낱말(superior 같은)이 섞이는지 봄. 전문 용어(baseline, BLEU-1)는 영어로 써도 맞음
-6. `Find the paper in my Downloads` → 영어로 답하면 맞음
-7. `/lang en` → 화면 글(작업 중, 승인 카드, /context)이 영어로 바뀜. `/lang ko`로 돌아옴
+Fill in servers.toml in `GLADOS_HOME` and reopen GLaDOS. One `[[server]]` block per server; `alias` is the `Host` name from step 2 and must be different for each server.
+```toml
+[[server]]
+alias = "server-a"                       # the Host name in ~/.ssh/config
+gpus = 4
+workdir = "/home/<user>/workspace"       # your work folder; remote.exec and relative paths start here
+tmux_prefix = "glados-<user>"            # used from M5
 
-## M2 시험해 볼 말
+[[server]]
+alias = "server-b"
+gpus = 8
+workdir = "/home/<user>/project"
+tmux_prefix = "glados-<user>"
+```
+`/servers` lists them as `연결 안 됨` (not connected) until the first question. The account name used to tell your folders from other people's is `[user] name` in glados.toml, the same on every server.
 
-1. `다운로드랑 문서 폴더에서 계약서 PDF 찾아줘`
-2. `찾은 PDF 하나 읽고 위약금 조항만 정리해줘`
-3. `방금 정리한 걸 문서 폴더에 위약금_정리.md로 저장해줘`
-4. `위약금_정리.md에서 제목을 "위약금 요약"으로 바꿔줘` → 승인 카드 → `/undo`로 되돌리기
-5. `/log`로 판정 기록 보기
+**When GLaDOS cannot connect**
 
-## 장비별 모델 (glados.toml)
+| GLaDOS says | Fix |
+|---|---|
+| The host key of server-a is not in known_hosts | Run `ssh server-a` once in a terminal and answer `yes` (step 3) |
+| Key login to server-a failed | The key is not on the server or not loaded: steps 3 to 5, then check with step 4 |
+| Cannot reach server-a (... a VPN may be needed) | Outside the campus network, connect the VPN first. Otherwise check `HostName` and `Port` |
+| server-a is not a configured server | `alias` in servers.toml does not match; reopen GLaDOS after editing servers.toml |
 
-| 장비 | `model.mode` | 모델 | 맥락 |
+No need to restart GLaDOS after fixing the key: ask again and it connects.
+
+## Things to try: M4 (servers)
+
+1. `/servers` → the servers from servers.toml, `연결 안 됨`, and a hint
+2. `server-a GPU 비었어?` (is a GPU free on server-a?) → `remote.gpu` → per-GPU states and how many you may use now (1 on weekday daytime, 2 otherwise). An idle GPU first shows as checking; ask again after 5 minutes and it shows as free. GPUs used by other people show only as "in use by another user". `/servers` now shows `연결됨` and the last check time
+3. `server-a 작업 폴더에 뭐 있어?` (what is in the work folder?) → `remote.log` lists it newest first; then `제일 최근 로그 끝부분 보여줘` (show the end of the latest log) → the last 80 lines
+4. `server-a 디스크 얼마나 남았어?` (how much disk is left?) → `remote.exec df -h` runs without approval
+5. `server-a에서 /home/다른사람 폴더 보여줘` (show another user's folder) → blocked by the code rule. `server-a에서 sudo nvidia-smi` → blocked. `server-a에서 rm old.log` → approval card every time
+6. Turn off the VPN (or use a wrong alias in servers.toml) and ask again → the answer says what to check instead of an SSH traceback
+
+## Things to try: M3.1 (working folder)
+
+1. Run `uv run glados` from the repository folder → the start screen shows `작업 폴더: C:\Users\User\Documents\GLaDOS (…옮겼습니다…)` and the header shows the same working folder
+2. `간단한 파이썬 예제 만들어봐` (make a simple Python example) → a .py file in Documents\GLaDOS; running it shows an approval card (`python …` is not on the allowlist) → the output
+3. `!cd C:\Users\User\code\glados` → the old note (read-only commands only) appears
+
+## Things to try: M3 (web)
+
+1. `LLM 평가 지표 최신 논문 3개 찾아서 요약해줘` (find and summarize 3 recent papers on LLM evaluation metrics) → plan (search → read pages → summarize) → `web.search` (time_range=year) → `web.fetch` on the paper pages → summary with source URLs. The header chip grows (e.g. `외부 전송 4 · 웹 검색 1`) and the right panel lists the query and URLs under "밖으로 보낸 것"
+2. Open the source URLs or compare with `/sent`: are the cited URLs really from the results? (An invented URL leaves a trace in the process panel: `! 답의 출처 주소가 도구 결과에 없어…`)
+3. `https://arxiv.org/abs/1706.03762 요약해줘` → `web.fetch` directly, no search; the PDF URL (`…/pdf/1706.03762`) works too
+4. `다운로드의 논문 하나 읽고 그 제목으로 후속 연구 찾아줘` (read a paper in Downloads and search for follow-ups by its title) → a title read from a file goes into the query, so an approval card appears ("이 대화에서 읽은 파일의 글"). Denying it sends nothing
+5. `내 이메일 ○○@○○.com 로 검색해줘` → approval card (email address). `http://192.168.0.1 읽어줘` → local-address approval card
+6. With web search off, `오늘 뉴스 찾아줘` (find today's news) → no invented news; it says web search is not set up
+
+## Things to try: M2.7 (plans and inspection)
+
+1. `다운로드에서 PDF 찾아줘` then `그 중에서 논문 찾아줘` (find PDFs in Downloads, then the papers among them) → the process panel shows a `계획` (plan) first (e.g. names are not enough → ask fs.inspect "Is this an academic paper?" for each PDF → report the yes ones), then `fs.inspect` runs and the papers are listed with reasons. About a minute the first time (67 files, 6 per model call); the same question is instant afterwards
+2. While working, elapsed time runs in the card kicker and header, and `↑ … ↓ … 토큰` with the text being written scrolls inside the card; when the answer arrives it disappears and only the answer remains
+3. If a plan looks wrong (e.g. searching names only) or a file is misjudged, report the plan and the file names; the fix goes into tool descriptions and instructions, not hard-coded rules
+4. `다운로드에서 위약금 나오는 문서 찾아줘` (find documents in Downloads that mention penalties) → does the model pick `content=true`, and does the result say `Contents checked: N of M files`
+5. When the answer says something was not found in the contents, were they really read? Check the numbers in the result (scanned PDFs, encrypted files, and hwp are counted separately)
+6. For `안녕` (hello), the plan should be one line or absent
+
+## Things to try: M2.6 (TUI)
+
+In Windows Terminal, `uv sync` then `uv run glados`.
+
+1. Start screen: logo (Lissajous symbol and GLaDOS written in dots), greeting, two suggestion cards; clicking a card fills the input. If Braille shows up as boxes (□), it is a font problem; please report it
+2. Korean input: while typing `다운로드에서 논문 찾아줘`, does the composing character appear inside the input box at the cursor? Do final consonants and double finals (`읽었`, `값`) stay intact? Is typing the next message fine while working (header dot moving)? If not, describe what happens and try `motion = false` or `uv run glados --plain`
+3. The answer goes into a task card (kicker `작업 · 완료 · 12초 · 도구 1번`, request, facts in bold, wit), the process into the right panel, with searched scope and sources there too. The header state changes from `작업 중 · fs.search · 1단계` to `완료 · 12초`, and the task moves from `진행 중` to `이번 대화` in the list
+4. After `!cd ..` out of the GLaDOS folder, `uv 캐시 정리해줘` (clean the uv cache) → approval dialog (cobalt border, one-line buttons), header `결정 대기`, cobalt dot in the list. Keys 1, 2, 3, ←→ then Enter, or Esc (deny). Digits and Enter pressed right as the dialog appears are ignored (so typing never turns into an approval)
+5. Esc during a long task → `연구원님이 멈췄습니다.` appears shortly (even while the model is writing)
+6. `!git status`, `!cd ..` → output box and the working folder in the header
+7. Paste a multi-line error message → the input shows `[붙여넣은 글 1 · N줄]` and the whole text is sent
+8. `+ 새 대화` (or `/new`) → back to the start screen. `/lang en`, F2, F3, ↑↓, Ctrl+Q
+
+## Things to try: M2.5 (English inside, translated answers)
+
+1. `다운로드 폴더에서 논문 찾아줘` → the model searches in English (e.g. `query=paper`), `학위논문.pdf` matches as `en: thesis, ...`, and the answer comes in Korean. The first search takes a few extra seconds to translate words in file names
+2. `찾은 PDF 하나 읽고 요약해줘` → reads a path found earlier and summarizes in Korean
+3. `Find the paper in my Downloads` → finds the same file and answers in English (no translation; words come from the cache)
+4. Watch for Chinese characters or odd English words (such as superior) in Korean answers
+
+## Things to try: M2.4
+
+1. `Find the paper in my Downloads` → finds `학위논문.pdf` and answers in English
+2. `!git status` → runs at once and shows the output. Then `방금 결과 설명해줘` (explain that output) → answers from it
+3. `파이썬 버전 알려줘` (what Python version) → GLaDOS runs `python --version` (no approval)
+4. A command outside the allowlist, such as `uv 캐시 정리해줘` → approval card
+5. Since M3.1, starting in the GLaDOS folder (`C:\Users\User\code\glados`) moves the working folder to Documents\GLaDOS; after `!cd` back into the GLaDOS folder only read-only commands run and the rest are blocked
+
+## Things to try: M2.2 (two lines that failed in M2, plus memory)
+
+1. `다운로드 폴더에서 논문 하나 찾아줘` → searches with `roots=['~/Downloads']` and reports only the found file without reading it
+2. `찾은 PDF 하나 읽고 요약해줘` → calls `fs.read` on the path found earlier. If it tries to answer without tools, a dim line "도구로 확인하지 않은 답이라 다시 확인하게 했습니다" appears and it checks again
+3. `그 논문 결론만 다시 말해줘` (repeat just the conclusion) → answers from what was read, without reading again, with that file in the sources
+4. `/context` → the last 3 tasks are included as [전체] (full)
+5. Watch for plain English words (such as superior) in Korean answers. Technical terms (baseline, BLEU-1) may stay in English
+6. `Find the paper in my Downloads` → answers in English
+7. `/lang en` → screen texts (working, approval card, /context) switch to English; `/lang ko` switches back
+
+## Things to try: M2
+
+1. `다운로드랑 문서 폴더에서 계약서 PDF 찾아줘` (find contract PDFs in Downloads and Documents)
+2. `찾은 PDF 하나 읽고 위약금 조항만 정리해줘` (read one and summarize only the penalty clauses)
+3. `방금 정리한 걸 문서 폴더에 위약금_정리.md로 저장해줘` (save that summary to Documents as 위약금_정리.md)
+4. `위약금_정리.md에서 제목을 "위약금 요약"으로 바꿔줘` (change the title) → approval card → `/undo` restores it
+5. `/log` shows the policy decisions
+
+## Models per machine (glados.toml)
+
+| Machine | `model.mode` | Model | Context |
 |---|---|---|---|
-| 연구실 리눅스 (GPU 48GB), 맥북 | `normal` | qwen3.5:9b (맥은 9b-mlx) | 32k |
-| 집 Windows (GPU 8GB) | `low` | qwen3.5:4b | 16k |
+| Lab Linux (48 GB GPU), MacBook | `normal` | qwen3.5:9b (9b-mlx on Mac) | 32k |
+| Home Windows (8 GB GPU) | `low` | qwen3.5:4b | 16k |
 
-## 구조
+## Layout
 
 ```
 src/glados/
-  cli.py              줄 화면과 엔진 연결(App), 이벤트 -> 화면 줄(event_lines). glados 시작점
-  tui.py              TUI 화면 (Textual, Workbench 디자인). 엔진 연결은 cli.App 그대로, 작업은 스레드에서
-  logo.py             로고: 리사주 심볼(점자 글자, 상태별 모습)과 워드마크
-  config.py           설정 읽기 (utf-8)
-  osinfo.py           OS 구분, 관리자 확인, 다운로드·문서·바탕화면 실제 위치
-  i18n.py             화면 글 두 벌 (한국어·영어). 엔진은 키만 넘기고 화면이 그 언어로 만든다
-  core/llm.py         모델 호출은 여기 한 곳
-  core/loop.py        에이전트 루프 (함수 하나, 나중에 glados serve가 그대로 부름)
-  core/context.py     대화 기억: 지난 작업을 맥락 길이에 맞게 넣기
-  core/schema.py      출력 계약
-  core/prompts.py     시스템 프롬프트 (prompts/persona.md)
-  safety/policy.py    정책 엔진 check()
-  safety/locations.py 위치 세 갈래 판정
-  safety/checkpoint.py 체크포인트, /undo
-  safety/privacy.py   밖으로 나가는 글 검사 (개인 정보, 파일 내용, 내부 주소). 코드 규칙
-  hands/fs.py         파일 손 (모든 OS 같은 코드)
-  hands/docs.py       문서 내용: pdf·docx 글 뽑기, 글과 살펴본 답의 캐시 (판단은 하지 않음)
-  hands/shell.py      명령 손 shell.run과 채팅의 !명령 (Windows PowerShell, 맥·리눅스 bash/zsh)
-  hands/web.py        웹 손 web.search(교체형: Tavily·Brave·SearXNG·Ollama), web.fetch(본문 뽑기), 외부 전송 기록
-  core/guards.py      답 안전망 (하겠다고만 함, 파일 이야기 판단). 영어 글 기준
-  core/translate.py   영어로 통일: 언어 판단, 이름 낱말 -> 영어 (Glossary, 캐시), 답 번역 (Translator)
-  hands/<os>/         OS별 손 (앱 조작은 v1)
-  memory/log.py       작업 기록, 정책 판정 기록
-  defaults/           처음 실행 때 쓰는 기본 설정
+  cli.py              line screen and engine wiring (App), events -> screen lines (event_lines); glados entry point
+  tui.py              TUI (Textual, Workbench design); reuses cli.App for the engine, runs tasks in threads
+  logo.py             logo: Lissajous symbol (Braille, per-state looks) and wordmark
+  config.py           settings (utf-8)
+  osinfo.py           OS detection, admin check, real locations of Downloads, Documents, Desktop
+  i18n.py             screen texts in Korean and English; the engine passes keys and the screen renders them
+  core/llm.py         the only place that calls the model
+  core/loop.py        agent loop (one function; glados serve will call it as is)
+  core/context.py     conversation memory: fit earlier tasks into the context length
+  core/schema.py      output contract
+  core/prompts.py     system prompt (prompts/persona.md)
+  core/guards.py      answer safety nets (promise-only answers, file and current-information talk); English text
+  core/translate.py   English inside: language detection, name words -> English (Glossary, cache), answer translation (Translator)
+  safety/policy.py    policy engine check()
+  safety/locations.py three kinds of location
+  safety/checkpoint.py checkpoints, /undo
+  safety/privacy.py   outgoing text check (personal details, file contents, local addresses); code rules
+  safety/fair.py      shared-server rules: when a GPU counts as free, how many GPUs you may use now
+  hands/fs.py         file hands (same code on every OS)
+  hands/docs.py       document contents: pdf and docx text extraction, cache of text and inspection answers (no judging)
+  hands/shell.py      command hands: shell.run and the chat's !command (PowerShell on Windows, bash/zsh on macOS and Linux)
+  hands/web.py        web hands: web.search (pluggable: Tavily, Brave, SearXNG, Ollama), web.fetch (main-text extraction), sent-outside log
+  hands/remote.py     server hands: SSH connection hub (asyncssh, one connection per server), remote.gpu, remote.log, remote.exec
+  hands/<os>/         per-OS hands (app control in v1)
+  memory/log.py       task log, policy decision log
+  defaults/           default settings written on first run
 tests/
 ```
 
-손은 v0에서 엔진 안에 있다. 외부 프로그램(VSCode 등)과 이을 때 같은 인터페이스를 MCP 서버로 감싼다.
+In v0 the hands live inside the engine. When an external program (VSCode, etc.) needs them, the same interface gets wrapped as an MCP server.
 
-## 다음
+## Next
 
-M4 서버 읽기(remote.gpu·remote.log·remote.exec, `/servers`) → M5 서버 실행·감시 → M6 이어하기·기억
+M5 server runs and monitoring (remote.run in tmux with a run card, waiting for a free GPU by the rules above, `/runs`, progress and finish notices) → M6 resume and memory

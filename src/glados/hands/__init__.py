@@ -71,6 +71,9 @@ class HandContext:
     egress: Any = None                           # hands.web.Egress: 이 세션의 외부 전송 기록. 없으면 웹 손이 만든다
     emit: Callable[[Any], None] | None = None    # 손이 알리는 이벤트 (외부 전송). 작업마다 앱이 넣는다
     env: dict[str, str] | None = None            # API 키를 찾을 환경 변수 (없으면 os.environ. 시험에서 바꿈)
+    servers: list[Any] = field(default_factory=list)   # config.Server 목록 (servers.toml). 비면 원격 손 없음 (M4)
+    hub: Any = None                              # hands.remote.Hub: 서버 연결들 (앱이 끝날 때 닫는다)
+    gpu_watch: Any = None                        # safety.fair.GpuWatch: 서버 GPU를 본 기록 (이 세션)
 
 
 class ToolRegistry:

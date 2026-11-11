@@ -71,7 +71,7 @@ _RULE_EN = {
     "관리자권한": "admin", "미등록도구": "unregistered", "읽기전용단계": "readonly_stage", "음성": "voice",
     "안전장치": "safety", "관리자표시": "admin_flag", "공유서버": "shared_server",
     "안전장치폴더": "safety_folder", "명령잇기": "chained", "보호위치명령": "protected_command",
-    "개인정보": "private_data", "내부주소": "local_address", "환경변수": "env_vars",
+    "개인정보": "private_data", "내부주소": "local_address", "환경변수": "env_vars", "남의파일": "others_files", "서버지우기": "server_delete",
 }
 
 
@@ -189,6 +189,25 @@ TEXT: dict[str, dict[str, str]] = {
                       "en": "Cannot open the PDF (encrypted or damaged): {detail}"},
     "tool.docx_open": {"ko": "docx를 열 수 없습니다: {detail}", "en": "Cannot open the docx: {detail}"},
     "tool.no_file": {"ko": "파일이 없습니다: {path}", "en": "No such file: {path}"},
+    # 원격 손 (M4)
+    "tool.remote_unknown": {"ko": "{server}는 servers.toml에 없는 서버입니다 (있는 서버: {servers})",
+                            "en": "{server} is not a configured server (configured: {servers})"},
+    "tool.remote_hostkey": {"ko": "{server}의 서버 키가 known_hosts에 없습니다. 터미널에서 한 번 `ssh {server}`로 접속해 키를 확인해 주세요",
+                            "en": "The host key of {server} is not in known_hosts. Tell the Researcher to connect once "
+                                  "with `ssh {server}` in a terminal and accept the key"},
+    "tool.remote_auth": {"ko": "{server}에 키로 로그인하지 못했습니다. GLaDOS는 비밀번호를 쓰지 않습니다: ssh-agent에 키를 넣거나(ssh-add) ~/.ssh/config의 IdentityFile을 확인해 주세요",
+                         "en": "Key login to {server} failed. GLaDOS does not use passwords: the Researcher needs the key "
+                               "in ssh-agent (ssh-add) or an IdentityFile in ~/.ssh/config"},
+    "tool.remote_unreachable": {"ko": "{server}에 연결할 수 없습니다: {detail} (학교 밖이면 VPN을 확인해 주세요)",
+                                "en": "Cannot reach {server}: {detail} (outside the campus network a VPN may be needed)"},
+    "tool.remote_timeout": {"ko": "{server}에서 {seconds}초 안에 끝나지 않았습니다", "en": "Nothing came back from {server} within {seconds}s"},
+    "tool.remote_failed": {"ko": "{server}에서 실패했습니다: {detail}", "en": "Failed on {server}: {detail}"},
+    "tool.remote_no_gpu": {"ko": "{server}에서 nvidia-smi를 찾지 못했습니다 (GPU나 드라이버가 없음)",
+                           "en": "nvidia-smi is not available on {server} (no NVIDIA GPU or driver)"},
+    "tool.remote_no_file": {"ko": "{server}에 없는 경로입니다: {path}", "en": "No such file or folder on {server}: {path}"},
+    "tool.remote_outside": {"ko": "{server}의 {path}는 내 홈·작업 폴더 밖이라 읽지 않습니다",
+                            "en": "{path} on {server} is outside your home and work folders, so it was not read"},
+    "tool.remote_empty": {"ko": "명령이 비어 있습니다", "en": "The command is empty"},
     # 웹 손 (M3). 영어는 모델이 보는 글 (연구원님께 전할 것을 함께 적음)
     "tool.web_off": {"ko": "웹 검색이 아직 설정되지 않았습니다. glados.toml의 [web] search에 검색 서비스를 적어 주세요 (README의 M3 설정)",
                      "en": "Web search is not set up on this computer. Tell the Researcher to choose a search service "
@@ -283,14 +302,16 @@ TEXT: dict[str, dict[str, str]] = {
               "  /undo     마지막 파일 수정(fs.edit) 되돌리기\n"
               "  /lang     화면 언어 바꾸기 (/lang ko, /lang en. 이번 세션만)\n  /quit     끝내기\n"
               "  !명령     명령을 바로 실행 (예: !git status, !dir, !cd 폴더). 승인 없이 돌고 결과는 대화 기억에 남습니다\n"
-              "  /servers /runs /resume   다음 단계에서 만듭니다\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다.\n"
+              "  /servers  서버 목록과 연결·GPU 상태 (servers.toml)\n"
+              "  /runs /resume   다음 단계에서 만듭니다\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다.\n"
               "답은 물은 언어로 합니다 (한국어로 물으면 한국어, 영어로 물으면 영어).",
         "en": "Commands\n  /help     this help\n  /new      new conversation (forget the earlier one)\n"
               "  /context  what is in memory now\n  /log      last 10 policy decisions\n"
               "  /sent     what was sent outside this session (web queries, fetched URLs)\n"
               "  /undo     undo the last file edit (fs.edit)\n  /lang     change the screen language (/lang ko, /lang en; this session only)\n"
               "  /quit     exit\n  !command  run a command directly (e.g. !git status, !dir, !cd folder); no approval, and the output stays in memory\n"
-              "  /servers /runs /resume   coming in later stages\nCtrl+C during a task stops only that task.\n"
+              "  /servers  servers with connection and GPU state (servers.toml)\n"
+              "  /runs /resume   coming in later stages\nCtrl+C during a task stops only that task.\n"
               "Answers follow the language you ask in (Korean or English).",
     },
     "command.later": {"ko": "{cmd}는 {stage}에서 만듭니다.", "en": "{cmd} arrives in {stage}."},
@@ -300,6 +321,17 @@ TEXT: dict[str, dict[str, str]] = {
     "lang.now": {"ko": "화면 언어: {name}. 이번 세션에만 적용됩니다. 계속 쓰려면 glados.toml의 [ui] language를 바꾸세요.",
                  "en": "Screen language: {name}. This session only; to keep it, set [ui] language in glados.toml."},
     "lang.usage": {"ko": "사용법: /lang ko 또는 /lang en (지금: {name})", "en": "Usage: /lang ko or /lang en (now: {name})"},
+    "servers.empty": {"ko": "설정된 서버가 없습니다. GLADOS_HOME의 servers.toml에 alias(~/.ssh/config의 Host 이름)와 workdir(내 작업 폴더)를 적고 GLaDOS를 다시 여세요.",
+                      "en": "No servers are set up. Add alias (the Host name in ~/.ssh/config) and workdir (your work folder) "
+                            "to servers.toml in GLADOS_HOME, then reopen GLaDOS."},
+    "servers.head": {"ko": "서버 {count}대 (servers.toml, 접속은 ~/.ssh/config와 ssh-agent)",
+                     "en": "{count} server(s) (servers.toml; connection details from ~/.ssh/config and ssh-agent)"},
+    "servers.line": {"ko": "  {alias}  {state} · GPU {gpus}장 · 작업 폴더 {workdir}", "en": "  {alias}  {state} · {gpus} GPUs · work folder {workdir}"},
+    "servers.connected": {"ko": "연결됨", "en": "connected"},
+    "servers.idle": {"ko": "연결 안 됨", "en": "not connected"},
+    "servers.seen": {"ko": "    마지막 GPU 확인 {time}: 빔 {free}, 확인 중 {checking}, 내 것 {mine}, 사용 중 {busy}",
+                     "en": "    last GPU check {time}: free {free}, checking {checking}, yours {mine}, in use {busy}"},
+    "servers.hint": {"ko": "GPU를 보려면 \"{alias} GPU 비었어?\"처럼 물어보세요.", "en": "To check GPUs, ask \"Is a GPU free on {alias}?\""},
     "sent.empty": {"ko": "이 세션에서 이 컴퓨터 밖으로 보낸 것이 없습니다.", "en": "Nothing has been sent outside this computer in this session."},
     "sent.head": {"ko": "이 세션의 외부 전송 {sent}건 (웹 검색 {searches}건)", "en": "Sent outside in this session: {sent} (web searches: {searches})"},
     "sent.search": {"ko": "검색", "en": "search"},
@@ -352,7 +384,15 @@ TEXT: dict[str, dict[str, str]] = {
     "policy.safety_command": {"ko": "GLaDOS 안전장치 위치를 건드리는 명령입니다", "en": "This command touches a GLaDOS safety location"},
     "policy.admin_inline": {"ko": "관리자 권한은 명령 안에서 올리지 않고 admin 표시로 요청해야 합니다",
                             "en": "Administrator rights must be requested with the admin flag, not inside the command"},
-    "policy.remote_sudo": {"ko": "공유 서버에서 sudo는 쓰지 않습니다", "en": "sudo is not used on shared servers"},
+    "policy.remote_sudo": {"ko": "공유 서버에서 sudo·su는 쓰지 않습니다", "en": "sudo and su are not used on shared servers"},
+    "policy.remote_proc": {"ko": "공유 서버에서 프로세스·시스템을 건드리는 명령은 하지 않습니다 (내 실행 멈추기는 M5)",
+                           "en": "Commands that control processes or the system are not run on shared servers "
+                                 "(stopping your own runs comes in M5)"},
+    "policy.remote_others": {"ko": "다른 사람의 폴더입니다 ({path}). 공유 서버에서 다른 사람 파일은 읽지 않습니다",
+                             "en": "That is another user's folder ({path}). Other users' files are never read on shared servers"},
+    "policy.remote_destructive": {"ko": "서버에서 지우거나 옮기거나 덮어쓰는 명령입니다 (되돌릴 수 없음)",
+                                  "en": "This command deletes, moves, or overwrites files on the server (cannot be undone)"},
+    "policy.remote_outside": {"ko": "내 홈·작업 폴더 밖입니다 ({path})", "en": "Outside your home and work folders ({path})"},
     "policy.safety_cwd": {"ko": "GLaDOS 안전장치 폴더({why}) 안에서는 허용 목록의 읽기 명령만 실행합니다",
                           "en": "Inside a GLaDOS safety folder ({why}) only allowlisted read-only commands run"},
     "policy.ask_compound": {"ko": "명령을 잇거나(; && |) 출력을 돌리는(>) 명령이라 승인이 필요합니다",

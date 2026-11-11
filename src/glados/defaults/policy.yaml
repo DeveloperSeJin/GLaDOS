@@ -91,20 +91,53 @@ web.search:              # 외부 전송으로 세고 표시. 코드 규칙: 검
 web.fetch:               # 외부 전송으로 세고 표시. 코드 규칙: 이 컴퓨터·내부 네트워크 주소, 주소에 개인 정보면 매번 승인
   "*": allow
 
-remote.gpu:
+remote.gpu:              # 공유 서버 GPU 상태 (읽기만). 다른 사람 프로세스는 몇 개인지만
   "*": allow
 
-remote.log:
+remote.log:              # 서버의 로그 끝·폴더 목록. 코드 규칙: 내 홈·작업 폴더 밖, 다른 사람 폴더는 차단
   "*": allow
 
-remote.exec:
-  "*": deny
-  "nvidia-smi*": allow
+remote.exec:             # 서버에서 짧은 명령 (작업 폴더에서). 허용 목록 밖은 승인. 코드 규칙: sudo·su,
+  "*": ask               #   kill·reboot·systemctl, 다른 사람 폴더(/home/다른사람, ~다른사람, /root)는 차단,
+  # 상태 보기             #   잇거나 돌리면(; && | >) 승인. 학습 실행은 M5의 remote.run
+  "nvidia-smi -L": allow           # 그냥 nvidia-smi는 다른 사람 프로세스까지 보여 줘서 승인 (GPU 상태는 remote.gpu로)
+  "nvidia-smi --query-gpu*": allow
+  "df": allow
   "df *": allow
   "du *": allow
-  "tail *": allow
+  "free": allow
+  "free *": allow
+  "uptime": allow
+  "whoami": allow
+  "id": allow
+  "hostname": allow
+  "uname*": allow
+  "quota*": allow
+  "pwd": allow
+  # 내 파일 보기 (다른 사람 폴더는 코드 규칙이 막음)
+  "ls": allow
   "ls *": allow
   "cat *": allow
+  "head *": allow
+  "tail *": allow
+  "wc *": allow
+  "grep *": allow
+  # git 읽기
+  "git status*": allow
+  "git log*": allow
+  "git diff*": allow
+  "git show*": allow
+  "git branch*": allow
+  "git remote -v": allow
+  # 버전·목록
+  "python --version": allow
+  "python3 --version": allow
+  "nvcc --version": allow
+  "pip list*": allow
+  "pip show *": allow
+  "conda env list": allow
+  "conda list*": allow
+  "tmux ls": allow
 
 git.snapshot:
   "*": allow

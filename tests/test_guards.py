@@ -118,6 +118,21 @@ def test_translation_retry_and_fallback():
     assert result.answer.fact == "Hello, Researcher." and shown.data["untranslated"]   # 끝내 못 하면 영어 그대로
 
 
+def test_translation_keeps_server_names():
+    """서버 별칭은 낱말이 아니라 이름: "temp"가 "임시 서버"가 되면 다시, 끝내 바뀌면 영어 원문."""
+    fact = "Cannot log in to temp with a key. Add your key with ssh-add."
+    llm = FakeLLM([translation("임시 서버에 키로 로그인할 수 없습니다."), translation("temp에 키로 로그인할 수 없습니다.")])
+    tr = Translator(llm, keep=["temp", "server-a"])
+    assert tr.translate(fact, "", "ko") == ("temp에 키로 로그인할 수 없습니다.", "")
+    system = llm.calls[0][0][0]["content"]
+    assert "temp" in system and "server-a" not in system                         # 답에 나온 이름만 알려 줌
+    assert "temp" in llm.calls[1][0][-1]["content"]                                # 다시 할 때 바뀐 이름을 짚음
+    llm = FakeLLM([translation("임시 서버에 로그인할 수 없습니다."), translation("임시 서버입니다.")])
+    assert Translator(llm, keep=["temp"]).translate(fact, "", "ko") is None
+    llm = FakeLLM([translation("파일을 찾지 못했습니다.")])                          # 이름이 없으면 그대로
+    assert Translator(llm, keep=["temp"]).translate("No files in temperature_logs.", "", "ko") == ("파일을 찾지 못했습니다.", "")
+
+
 def test_translation_rejects_chinese_characters():
     llm = FakeLLM([answer("No files found."), translation("파일을放宽 찾지 못했습니다."), translation("파일을 찾지 못했습니다.")])
     result, _ = run(llm, "파일 있어?", tools=ToolRegistry(), reply_lang="ko")
