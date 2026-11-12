@@ -13,7 +13,7 @@ num_ctx = 32768
 
 [model.low]
 name = "qwen3.5:4b"
-num_ctx = 16384
+num_ctx = 32768                  # 8GB GPU에서 잼 (2026-11-12): 100% GPU, 4.1GB, 24k 토큰 읽기 5.7초. 안 들어가면 16384
 
 [ui]
 language = "ko"         # 화면 언어: "ko" 또는 "en". 답은 물은 언어로 한다 (한국어로 물으면 한국어)

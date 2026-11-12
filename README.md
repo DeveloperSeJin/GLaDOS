@@ -11,7 +11,7 @@ Design notes and decisions live in the GLaDOS project documents (`handoff.md`, `
 | Policy engine | Three kinds of location (normal, protected, GLaDOS safety), layered rules, admin rights, voice and experiment-stage rules |
 | Model calls | Ollama `/api/chat` with a forced JSON schema (down to each tool's arguments), thinking mode off, up to 2 retries on format errors |
 | Agent loop | Limits (12 steps, 3 identical calls, 2 errors from the same tool), approvals (once, for this task, deny) |
-| Conversation memory (M2.2) | Remembers earlier tasks in full: tool calls and results (found files, text that was read) go into the next request as they were. Past the model's context length (16k at home, 32k in the lab), older tasks are shrunk step by step: full → clipped (start of each result) → brief (answer and work notes) → dropped. The length is checked before every call so Ollama never silently cuts the front of the conversation. `/context` shows it, `/new` starts a new conversation (the earlier one is saved, see below) |
+| Conversation memory (M2.2) | Remembers earlier tasks in full: tool calls and results (found files, text that was read) go into the next request as they were. Past the model's context length (32k at home and in the lab; 16k at home before M7.4), older tasks are shrunk step by step: full → clipped (start of each result) → brief (answer and work notes) → dropped. The length is checked before every call so Ollama never silently cuts the front of the conversation. `/context` shows it, `/new` starts a new conversation (the earlier one is saved, see below) |
 | English inside (M2.5) | Everything inside the engine is English: system prompt, the model's reasoning, search queries passed to tools, tool results and errors, memory. The model answers in English and the engine translates the facts into the language the Researcher wrote in; the one-sentence wit stays in English (M6.3) (Korean: polite 합니다 style, technical terms kept in English, no Chinese characters; if translation fails, the English answer is shown with a note). Questions in English get answers in English without translation |
 | English matching for search (M2.5) | Words in other languages inside file and folder names (학위논문, 請求書, März) are turned into English keywords (thesis, dissertation, paper) by the model and compared with the query in English. Translated words are cached in `GLADOS_HOME/cache/names-en.json`. No hand-made word lists. Result lines show the English meaning as `en: ...`. If no name matches every word, the 10 closest files in the same scope and kind are shown |
 | Screen language (M2.3) | `[ui] language = "ko"` or `"en"` in glados.toml, `/lang en` for this session only. Screen language and answer language are separate (asking in Korean on an English screen gets a Korean answer). Approval cards, block and stop messages, `/log`, `/context`, `/undo`, and tool errors all exist in both languages |
@@ -390,7 +390,7 @@ In Windows Terminal, `uv sync` then `uv run glados`.
 | Machine | `model.mode` | Model | Context |
 |---|---|---|---|
 | Lab Linux (48 GB GPU), MacBook | `normal` | qwen3.5:9b (9b-mlx on Mac) | 32k |
-| Home Windows (8 GB GPU) | `low` | qwen3.5:4b | 16k |
+| Home Windows (8 GB GPU) | `low` | qwen3.5:4b | 32k (measured 2026-11-12 with `measure-ctx.ps1`: 100% GPU, 4.1 GB, a 24k-token prompt read in 5.7 s, 62 tokens/s written; it was 16k before) |
 
 ## Layout
 

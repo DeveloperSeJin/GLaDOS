@@ -43,7 +43,10 @@ def test_low_mode(tmp_path):
     text = (tmp_path / "glados.toml").read_text(encoding="utf-8").replace('mode = "normal"', 'mode = "low"')
     (tmp_path / "glados.toml").write_text(text, encoding="utf-8")
     cfg = load_config(tmp_path)
-    assert cfg.model.name == "qwen3.5:4b" and cfg.model.num_ctx == 16384 and cfg.model.is_low
+    assert cfg.model.name == "qwen3.5:4b" and cfg.model.num_ctx == 32768 and cfg.model.is_low
+    (tmp_path / "glados.toml").write_text('[model]\nmode = "low"\n', encoding="utf-8")   # 값이 없어도 32k (M7.4: 8GB에서 잼)
+    cfg = load_config(tmp_path)
+    assert cfg.model.name == "qwen3.5:4b" and cfg.model.num_ctx == 32768
 
 
 def test_invalid_mode_raises(tmp_path):

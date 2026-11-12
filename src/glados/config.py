@@ -202,7 +202,7 @@ def load_config(home: Path) -> Config:
     model = ModelConfig(
         host=str(model_sec.get("host", ModelConfig.host)).rstrip("/"),
         name=str(picked.get("name", "qwen3.5:4b" if mode == "low" else ModelConfig.name)),
-        num_ctx=int(picked.get("num_ctx", 16384 if mode == "low" else ModelConfig.num_ctx)),
+        num_ctx=int(picked.get("num_ctx", ModelConfig.num_ctx)),          # 낮은 모드도 32k (8GB에서 잼, M7.4)
         think=bool(model_sec.get("think", False)),
         keep_alive=str(model_sec.get("keep_alive", "30m")),
         mode=mode,
