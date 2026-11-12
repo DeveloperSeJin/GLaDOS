@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from glados import osinfo
 from glados.i18n import DEFAULT_LANG, LANGS, KeyedError, t
 
 # 사용자 폴더 파일 이름 -> 패키지 안의 기본 파일 이름
@@ -49,8 +50,24 @@ def default_text(name: str) -> str:
     return (resources.files("glados") / "defaults" / name).read_text(encoding="utf-8")
 
 
-def ensure_home(home: Path) -> list[str]:
-    """폴더와 없는 기본 설정 파일을 만든다. 새로 만든 파일 이름 목록을 돌려준다."""
+# 웹 검색 기본값 (2026-11-12 연구원님 결정): Windows·맥은 Tavily, 리눅스는 이 컴퓨터에 띄운 SearXNG
+SEARCH_BY_OS = {
+    "windows": 'search = "tavily"                # Windows·맥 기본: Tavily (키는 환경 변수 TAVILY_API_KEY)',
+    "mac": 'search = "tavily"                # Windows·맥 기본: Tavily (키는 환경 변수 TAVILY_API_KEY)',
+    "linux": 'search = "searxng"               # 리눅스 기본: 이 컴퓨터에 띄운 SearXNG (README의 M3 설정)',
+}
+
+
+def default_glados_toml(os_name: str) -> str:
+    """처음 만드는 glados.toml: 웹 검색 칸을 이 OS의 기본값으로."""
+    text = default_text("glados.toml")
+    line = SEARCH_BY_OS.get(os_name)
+    return text.replace('search = ""\n', line + "\n", 1) if line else text
+
+
+def ensure_home(home: Path, os_name: str | None = None) -> list[str]:
+    """폴더와 없는 기본 설정 파일을 만든다. 새로 만든 파일 이름 목록을 돌려준다.
+    glados.toml의 웹 검색은 이 OS의 기본값으로 쓴다 (이미 있는 파일은 건드리지 않는다)."""
     home.mkdir(parents=True, exist_ok=True)
     for sub in SUBDIRS:
         (home / sub).mkdir(exist_ok=True)
@@ -58,7 +75,11 @@ def ensure_home(home: Path) -> list[str]:
     for target_name, default_name in DEFAULT_FILES.items():
         target = home / target_name
         if not target.exists():
-            target.write_text(default_text(default_name), encoding="utf-8")
+            if default_name == "glados.toml":
+                text = default_glados_toml(os_name or osinfo.current_os())
+            else:
+                text = default_text(default_name)
+            target.write_text(text, encoding="utf-8")
             created.append(target_name)
     return created
 

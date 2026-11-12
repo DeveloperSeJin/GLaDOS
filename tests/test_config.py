@@ -114,3 +114,19 @@ def test_bad_web_settings(tmp_path, body, key):
     with pytest.raises(ConfigError) as e:
         load_config(tmp_path)
     assert e.value.key == key
+
+
+def test_web_search_default_follows_the_os(tmp_path, monkeypatch):
+    """2026-11-12 결정: 처음 만드는 glados.toml의 웹 검색은 Windows·맥 Tavily, 리눅스 SearXNG. 있는 파일은 그대로."""
+    from conftest import REAL_SEARCH_BY_OS
+    from glados import config
+
+    monkeypatch.setattr(config, "SEARCH_BY_OS", REAL_SEARCH_BY_OS)
+    for os_name, want in (("windows", "tavily"), ("mac", "tavily"), ("linux", "searxng")):
+        home = tmp_path / os_name
+        assert "glados.toml" in config.ensure_home(home, os_name=os_name)
+        assert config.load_config(home).web.search == want
+        assert 'search = ""' not in (home / "glados.toml").read_text(encoding="utf-8")
+    (tmp_path / "linux" / "glados.toml").write_text('[web]\nsearch = ""\n', encoding="utf-8")
+    assert config.ensure_home(tmp_path / "linux", os_name="linux") == []                 # 이미 있으면 건드리지 않음
+    assert config.load_config(tmp_path / "linux").web.search == ""

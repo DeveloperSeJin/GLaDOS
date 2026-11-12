@@ -80,7 +80,7 @@ ENV_READ = re.compile(
     r"|^\s*ps\s+(?!-)\S*e"                                   # ps e, ps axe (BSD 모양: 환경 변수까지 보임)
 )
 # 밖으로 글을 보내는 도구와 그 글이 든 인자
-WEB_TOOLS: dict[str, str] = {"web.search": "query", "web.fetch": "url"}
+WEB_TOOLS: dict[str, str] = {"web.search": "query", "web.fetch": "url", "papers.search": "query"}   # 밖으로 나가는 글
 
 
 @dataclass(frozen=True)

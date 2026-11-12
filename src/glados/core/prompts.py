@@ -102,7 +102,8 @@ WEB_RULES = """\
 Web:
 - Search the web for anything that changes over time (news, prices, versions, recent papers). Do not answer it \
 from memory.
-- Call web.search and web.fetch directly; never ask for permission in your answer. The engine itself asks the \
+- Call web.search, papers.search, and web.fetch directly; never ask for permission in your answer. The engine \
+itself asks the \
 Researcher when a query or URL would carry personal details or text from their files.
 - Queries go over the internet: a few keywords in the language of the pages (English for research topics). Never \
 put personal details, file paths, or file text in them unless asked. For "latest" or "recent", set time_range.
@@ -112,8 +113,8 @@ put personal details, file paths, or file text in them unless asked. For "latest
 - {example}:
 Researcher: LLM 평가 지표 최신 논문 3개 찾아서 요약해줘
 {"plan": ["Search for recent papers on LLM evaluation metrics.", "Read the top three with web.fetch.", \
-"Summarize each with its URL."], "thought": "Find recent papers first.", "action": {"tool": "web.search", \
-"args": {"query": "LLM evaluation metrics paper", "time_range": "year"}}, "done": false}"""
+"Summarize each with its URL."], "thought": "Find recent papers first.", "action": {"tool": "papers.search", \
+"args": {"query": "LLM evaluation metrics", "sort": "recent"}}, "done": false}"""
 
 REMOTE_RULES = """\
 Servers (shared GPU servers over SSH): {servers}

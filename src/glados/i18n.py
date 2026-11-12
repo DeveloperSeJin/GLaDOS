@@ -261,6 +261,18 @@ TEXT: dict[str, dict[str, str]] = {
                                     "봇 차단(limiter)이 막았습니다",
                               "en": "SearXNG refused the request (403): JSON output is off (the Researcher needs json in "
                                     "search: formats in its settings.yml) or its bot limiter blocked the request"},
+    "tool.web_searxng_down": {"ko": "SearXNG({url})가 꺼져 있습니다. 터미널에서 docker start searxng (처음이면 README의 SearXNG 설정)",
+                              "en": "SearXNG at {url} is not running. Tell the Researcher to run: docker start searxng "
+                                    "(first time: see SearXNG setup in the README)"},
+    "tool.papers_limit": {"ko": "{name} 사용 한도에 걸렸습니다 (HTTP 429). 잠시 뒤 다시 하거나 무료 키를 넣으세요 (README)",
+                          "en": "{name} rate limit reached (HTTP 429). Try later; a free API key raises the limit (README)"},
+    "tool.papers_auth": {"ko": "{name}가 요청을 거절했습니다 (HTTP {status}). 키를 넣었다면 확인하세요",
+                         "en": "{name} refused the request (HTTP {status}); check the API key if one is set"},
+    "tool.papers_http": {"ko": "{name} 논문 찾기가 실패했습니다 (HTTP {status})", "en": "{name} paper search failed (HTTP {status})"},
+    "tool.papers_bad_reply": {"ko": "{name}의 답을 읽을 수 없습니다", "en": "Could not read the reply from {name}"},
+    "tool.papers_sort": {"ko": "sort는 relevance, recent, cited 중 하나입니다 (받은 값: {value})",
+                         "en": "sort must be relevance, recent, or cited (got {value})"},
+    "tool.papers_since": {"ko": "since는 연도입니다 (받은 값: {value})", "en": "since must be a year such as 2024 (got {value})"},
     "tool.web_unreachable": {"ko": "{host}에 연결할 수 없습니다: {detail}", "en": "Cannot reach {host}: {detail}"},
     "tool.web_timeout": {"ko": "{host}가 {seconds}초 안에 답하지 않았습니다", "en": "{host} did not answer within {seconds}s"},
     "tool.web_bad_reply": {"ko": "{name}의 답을 읽을 수 없습니다", "en": "Could not read the reply from {name}"},

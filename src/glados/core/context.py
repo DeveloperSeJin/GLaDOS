@@ -313,7 +313,7 @@ def local_texts(messages: list[Message]) -> tuple[str, str]:
     (safety/privacy.py). 웹 도구의 결과는 뺀다 (원래 밖에 있던 글)."""
     local: list[str] = []
     user: list[str] = []
-    web_obs = f"{OBS_PREFIX}: web."
+    web_obs = (f"{OBS_PREFIX}: web.", f"{OBS_PREFIX}: papers.")     # 원래 밖에 있던 글
     for m in messages:
         content = m["content"]
         if is_observation(m):
@@ -325,7 +325,7 @@ def local_texts(messages: list[Message]) -> tuple[str, str]:
             keep = True
             for line in content.split(MEMO_MARK, 1)[1].splitlines():
                 if line.startswith("- "):
-                    keep = not line.startswith("- web.")
+                    keep = not line.startswith(("- web.", "- papers."))
                 if keep:
                     local.append(line)
     return "\n".join(local), "\n".join(user)

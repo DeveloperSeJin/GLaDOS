@@ -158,7 +158,8 @@ def event_lines(e: Event) -> list[tuple[str, str]]:
         out.append(("dim", "... " + t(d.get("key") or "guard.evidence")))
     elif e.kind == ev.EGRESS:
         what = str(d.get("what", "")).replace("\n", " ")
-        out.append(("dim", t("render.egress_search" if d.get("tool") == "web.search" else "render.egress_fetch",
+        out.append(("dim", t("render.egress_search" if d.get("tool") in ("web.search", "papers.search")
+                             else "render.egress_fetch",
                              host=d.get("host", ""), what=what[:120] + ("..." if len(what) > 120 else ""))))
     elif e.kind == ev.STOP:
         reason = d.get("reason")

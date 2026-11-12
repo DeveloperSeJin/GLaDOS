@@ -349,6 +349,6 @@ def test_prompt_budget_at_16k_with_notes(tmp_path, num_ctx):
         for i in range(30):
             a.notes.add(f"note {i}: keep the batch size at 32 for the resnet runs")
         full = a.history_budget()
-        assert empty >= 2700 and 0 < empty - full <= 650 and full > 2000
+        assert empty >= 2600 and 0 < empty - full <= 650 and full > 1950
     finally:
         a.close()

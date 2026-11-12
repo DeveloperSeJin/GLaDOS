@@ -263,7 +263,7 @@ def test_hands_load_for_each_os(os_name, app):
     assert load_hands(os_name).names() == []                      # 손 정보가 없으면 도구 없음
     reg = load_hands(os_name, a.hctx)
     assert reg.names() == ["fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "shell.run", "web.search", "web.fetch",
-                           "session.resume", "memory.note"]
+                           "papers.search", "session.resume", "memory.note"]
     assert "fs.search(query, kind?, year?, roots?, content?, limit?)" in reg.describe()
 
 

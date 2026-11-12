@@ -12,7 +12,7 @@ from glados.safety.policy import Decision, Policy, PolicyContext, ToolCall
 ALL_TOOLS = frozenset({
     "fs.search", "fs.inspect", "fs.read", "fs.write_new", "fs.edit", "fs.trash", "shell.run",
     "web.search", "web.fetch", "remote.gpu", "remote.log", "remote.exec", "remote.run", "remote.stop", "remote.projects",
-    "git.snapshot", "ask.user", "session.resume", "memory.note",
+    "git.snapshot", "ask.user", "session.resume", "memory.note", "papers.search",
 })
 
 
@@ -38,6 +38,19 @@ def make_places(os_name: str, **kw: Any) -> Places:
 
 def base_layers() -> list[tuple[str, dict[str, Any]]]:
     return [("기본", parse_policy_text(default_text("policy.yaml"), "기본"))]
+
+
+REAL_SEARCH_BY_OS: dict[str, str] = {}      # OS별 웹 검색 기본값 (시험마다 비워 두기 전의 것)
+
+
+@pytest.fixture(autouse=True)
+def _no_default_search(monkeypatch):
+    """시험이 만드는 설정 폴더는 웹 검색 없이 (실제 기본값은 OS마다 다름: Windows·맥 Tavily, 리눅스 SearXNG).
+    OS별 기본값은 test_config에서 따로 본다."""
+    from glados import config
+    global REAL_SEARCH_BY_OS
+    REAL_SEARCH_BY_OS = REAL_SEARCH_BY_OS or dict(config.SEARCH_BY_OS)
+    monkeypatch.setattr(config, "SEARCH_BY_OS", {})
 
 
 @pytest.fixture(autouse=True)

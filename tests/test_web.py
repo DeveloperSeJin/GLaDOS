@@ -258,6 +258,15 @@ def test_search_errors_say_what_to_fix(site, tmp_path):
     with pytest.raises(ToolError) as e:
         tools["web.search"].run({"query": "x"})
     assert e.value.key == "tool.web_searxng_json"
+    # 이 컴퓨터의 SearXNG가 꺼져 있으면 켜는 법을 알려 준다 (리눅스 기본, 2026-11-12)
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        free = sock.getsockname()[1]                                               # 아무도 안 듣는 포트
+    tools, _, _ = hands(tmp_path, "searxng", searxng=f"http://127.0.0.1:{free}")
+    with pytest.raises(ToolError) as e:
+        tools["web.search"].run({"query": "x"})
+    assert e.value.key == "tool.web_searxng_down" and "docker start searxng" in str(e.value)
 
 
 def test_search_result_fits_in_one_observation(site, tmp_path):

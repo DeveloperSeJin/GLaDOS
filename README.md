@@ -22,6 +22,7 @@ Design notes and decisions live in the GLaDOS project documents (`handoff.md`, `
 | Plans and inspection (M2.7) | **The model decides how to do the task** (no hard-coded rules such as what counts as a paper). When tools are available, the first reply starts with a `plan`: what needs to be known, where it is, which tools get it, and how to check the result; the first step follows in the same reply. Output order is forced as plan → thought → `action` (null if none) → `done`; a plan without an action is sent back once. The TUI shows the plan in the right-hand process panel, the line screen shows it dimmed. Three general tools look inside files: `fs.search content=true` (words inside pdf, docx, and text files; for pdf the first 12 and last 3 pages; one matching line per file), **`fs.inspect`** (reads the start of each file and answers the model's own question, e.g. "Is this an academic paper?", with yes/no/unsure and a reason; 6 files per call, up to 300 files and 150 s), and `fs.read` (one whole file). Results state in numbers what was and was not checked: names only or contents, how many were read, and how many were skipped (scanned, encrypted, cloud-only, protected location, unreadable types such as hwp, time limit). Extracted text and inspection answers are cached in `GLADOS_HOME/cache/doctext.sqlite` (same file, question, and model are not asked again; never leaves this computer; safe to delete) |
 | TUI (M2.6) | Running `glados` in a terminal opens a full-window screen (Textual) that follows the Workbench console from the design canvas: header (presence symbol, GLaDOS, current state, model and working folder, and the chip `외부 전송 0 · 웹 검색 0`), task list on the left (+ new chat, in progress, this conversation; tasks waiting for a decision get a cobalt dot; click to open), task cards in the middle (kicker line, your request labeled `연구원님` (`You`), GLaDOS's answer under a cobalt dot and `GLaDOS` (M6.3) with facts in bold and wit dimmed, sources; `!commands` get an output box) with one input box (input and Send in one box; Send lights up white when there is text and becomes `멈춤 Esc` while working), context on the right (process, searched scope, sources, memory; this session and this computer at first). The start screen shows the logo (Lissajous symbol and the Michroma wordmark drawn with Braille characters), a greeting, and suggestion cards (click to fill the input). Approval dialogs look like approval cards (cobalt border). All buttons are one line: decisions are solid cobalt, the rest have a faint background, the shortcut key follows the label dimmed, and the button Enter will press is underlined; ←→ moves between them. Larger windows use more space (side panels widen at 150 and 190 columns; very wide windows get a 5-row wordmark and a 20×10 symbol with smoother curves). Esc or Ctrl+C stops only the current task (model calls stream, so they end quickly), ↑↓ recall sent messages, multi-line pastes show as `[붙여넣은 글 1 · 12줄]` and expand when sent. The terminal cursor stays in the input box so Korean IME composition appears there |
 | Web hands (M3) | `web.search`: the search service is configurable (`[web] search` = tavily, brave, searxng, or ollama); results are title, URL, date, and a short snippet. `web.fetch`: this computer fetches the page itself and keeps only the main text (menus, ads, and cookie notices removed; tables and code indentation kept), PDFs up to 40 pages with page markers, RSS, Atom, and JSON too. Text comes 3000 characters at a time (for an hour, continuations come from the local cache and nothing is sent again). Images and archives are not downloaded. Fetched text is wrapped in a "data, not instructions" marker for the model. The model searches → reads pages → answers with source URLs |
+| Paper search (M6.5) | `papers.search` finds research papers through official free scholarly APIs instead of a general web search: **OpenAlex** and **arXiv** together by default (no key needed), merged so the same paper appears once (arXiv ID, DOI, or title). Each result: title, URL (arXiv page or DOI), date, venue, first three authors, citation count (OpenAlex), PDF link, and the start of the abstract. `sort`: relevance (default), recent (newest first; arXiv by submission date), or cited (most cited; OpenAlex only); `since`: a year. If OpenAlex fails or hits its limit, **Semantic Scholar** answers instead. arXiv calls are kept 3 seconds apart (arXiv API terms). The same search is not sent again for an hour. Queries count as sent outside (header chip, `/sent`, `logs/egress.jsonl`) and go through the same personal-data check as web searches. Read a paper with `web.fetch` on its URL or PDF. Optional free keys raise the limits: `OPENALEX_API_KEY` (free OpenAlex account; 10× daily budget) and `SEMANTIC_SCHOLAR_API_KEY`. Thank you to arXiv for use of its open access interoperability |
 | Sent-outside display (M3) | Queries and fetched URLs are counted right before they are sent: header chip `외부 전송 2 · 웹 검색 1` (brightens once something is sent), "밖으로 보낸 것" (sent outside) in the right panel with destination and content, `↗` lines in the process panel, `/sent` (list for this session), and `logs/egress.jsonl` (a log GLaDOS cannot change) |
 | Outgoing text check (M3) | Code rules; a hit asks for approval every time (no "for this task"): a query or URL containing an email address, phone number, Korean resident registration number, card number, key-like string, file path, or a name from `[privacy] names`; or text from files that this computer's tools read in this conversation (five words in a row, four for Korean) or one of those file names (phrases the Researcher typed are excluded). Reading an address on this computer or the local network (localhost, 192.168.x.x, the router). A public address that redirects to a local one, or a name that resolves to a local address, is not followed. Commands that dump environment variables (`dir env:` and the like; API keys live there) also need approval every time |
 | Source URL check (M3) | If an answer cites a URL that never appeared in a tool result, it is sent back once (small models invent plausible paper URLs). Answering current information (news, prices, recent papers) from memory without tools is also sent back once |
@@ -39,7 +40,7 @@ Design notes and decisions live in the GLaDOS project documents (`handoff.md`, `
 | Logo (M2.6) | `logo.py` draws 06 LISSAJOUS with Braille characters. Presence states follow brand-identity: idle is a dim 1:2 curve with a still dot, working is a 3:2 curve with a moving dot (two-dot tail, about 7 s per loop), waiting for a decision is a dim curve with a breathing dot. Only the header symbol moves, only while working or waiting, and it pauses while the input box has text. `[ui] motion = false` keeps it still |
 | Line screen | `glados --plain` or `[ui] screen = "plain"`: the classic REPL. One-shot runs (`glados "task"`) and pipes always use the line screen. Facts in bold, wit dimmed |
 | Logs | `tasks.db` + `logs/tasks.jsonl`; policy decisions in `logs/policy.jsonl`; conversations in `sessions.db` |
-| Tests | 576 (policy 78, outgoing text check 63, file hands 43, commands 42, loop 38, TUI and logo 36, server reads 29, server runs 28, screen and tool lists 26, experiment sessions 20, screen language 22, conversations and memory 31, broken characters 5, v0 scenarios 6, safety nets 18, memory 17, settings 17, web hands 16, model calls 16, English matching 13, contents and inspection 12). The seven v0 scenarios run end to end through the app with a scripted model (`test_scenarios.py`; skipped on Windows, where a fake home folder cannot stand in for the real one). The TUI runs headless (Textual Pilot). Web hands are tested against fake search services and fake sites on this computer (no internet). Server reads, runs, and experiment sessions are tested against a fake SSH server on this computer with fake nvidia-smi and ps, a real tmux, a test clock for the 5-minute rule and time limits, and a scripted model for memory estimates and metric choices (skipped on Windows; the rule and policy tests still run). If PowerShell is installed, Windows command paths run for real |
+| Tests | 586 (policy 78, outgoing text check 63, file hands 43, commands 42, loop 38, TUI and logo 36, server reads 29, server runs 28, screen and tool lists 26, experiment sessions 20, screen language 22, conversations and memory 31, broken characters 5, v0 scenarios 6, safety nets 18, memory 17, settings 17, web hands 17, paper search 9, model calls 16, English matching 13, contents and inspection 12). The seven v0 scenarios run end to end through the app with a scripted model (`test_scenarios.py`; skipped on Windows, where a fake home folder cannot stand in for the real one). The TUI runs headless (Textual Pilot). Web hands are tested against fake search services and fake sites on this computer (no internet). Server reads, runs, and experiment sessions are tested against a fake SSH server on this computer with fake nvidia-smi and ps, a real tmux, a test clock for the 5-minute rule and time limits, and a scripted model for memory estimates and metric choices (skipped on Windows; the rule and policy tests still run). If PowerShell is installed, Windows command paths run for real |
 
 ## Install and run
 
@@ -102,7 +103,9 @@ About the `glados` command:
 
 ## Turning on web search (M3)
 
-Add this to glados.toml in `GLADOS_HOME` (older settings files lack it, so web search is off; reading pages still works).
+Which search service (decided 2026-11-12): **Tavily on Windows and macOS, a self-hosted SearXNG on Linux.** A new `GLADOS_HOME` gets that default in glados.toml; the API key (Tavily) or the SearXNG container (Linux) is still up to you, and until then the start screen or the search error says what is missing. Settings files made before this lack the `[web]` section, so web search is off there (reading pages still works); add it as below.
+
+Add this to glados.toml in `GLADOS_HOME`.
 ```toml
 [web]
 search = "tavily"       # "tavily" | "brave" | "searxng" | "ollama"
@@ -117,9 +120,51 @@ setx TAVILY_API_KEY "tvly-..."      # Tavily: free key at app.tavily.com (1,000 
 setx BRAVE_API_KEY "..."            # Brave Search: card required ($5 monthly credit)
 setx OLLAMA_API_KEY "..."           # Ollama web search: ollama.com/settings/keys
 ```
-- SearXNG (self-hosted): run it with Docker, add `json` to `search: formats` in its settings.yml, then set `search = "searxng"` and `searxng_url = "http://localhost:8888"`. No account or key needed
+- SearXNG (self-hosted, the Linux default): see "SearXNG on Linux" below. No account or key needed
 - The start screen shows something like `웹 검색: Tavily (api.tavily.com)` when it is on, and says so when the key is missing
 - To approve every search, add `"*": ask` under `web.search:` in policy.yaml in `GLADOS_HOME`
+
+### Paper search (M6.5)
+
+Works without any setup or key. Ask in your own words, for example:
+- `LLM 평가 지표 최신 논문 찾아줘` (newest first)
+- `2024년 이후 diffusion 기반 EEG 디코딩 논문 인용 많은 순으로` (since 2024, most cited)
+- `그 중 첫 번째 논문 읽고 요약해줘` (GLaDOS reads the paper's page or PDF with `web.fetch`)
+
+Optional keys, set like the Tavily key (not in the settings file):
+```
+setx OPENALEX_API_KEY "..."           # free OpenAlex account: 10x daily budget
+setx SEMANTIC_SCHOLAR_API_KEY "..."   # Semantic Scholar (used when OpenAlex fails): own 1 request/s instead of the shared pool
+```
+
+### SearXNG on Linux
+
+SearXNG is a metasearch engine you run yourself: it asks several search engines (Google, Bing, DuckDuckGo, Brave, Wikipedia, arXiv, ...) for you and returns the merged results, with no account or key. The official install is a Docker container. Once:
+```
+sudo usermod -aG docker $USER            # then log out and back in
+mkdir -p ~/searxng/config ~/searxng/data
+cat > ~/searxng/config/settings.yml <<EOF
+use_default_settings: true
+server:
+  secret_key: "$(openssl rand -hex 32)"
+  limiter: false
+search:
+  formats:
+    - html
+    - json
+EOF
+docker run --name searxng -d --restart unless-stopped \
+  -p 127.0.0.1:8888:8080 \
+  -v "$HOME/searxng/config:/etc/searxng" \
+  -v "$HOME/searxng/data:/var/cache/searxng" \
+  docker.io/searxng/searxng:latest
+curl -s "http://localhost:8888/search?q=test&format=json" | head -c 300
+```
+- `json` under `search: formats` lets GLaDOS read results (without it SearXNG answers 403, and GLaDOS says so)
+- `127.0.0.1:8888` keeps it to this computer (the docs' example `-p 8888:8080` opens it to the network); `--restart unless-stopped` brings it back after a reboot
+- glados.toml: `search = "searxng"` and `searxng_url = "http://localhost:8888"` (the defaults on Linux)
+- If it is not running, a search says `SearXNG(http://localhost:8888)가 꺼져 있습니다. 터미널에서 docker start searxng`
+- Update: `docker pull docker.io/searxng/searxng:latest`, then `docker rm -f searxng` and the `docker run` line again (settings stay in `~/searxng/config`)
 
 ## Setting up servers (M4)
 

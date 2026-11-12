@@ -91,6 +91,9 @@ web.search:              # 외부 전송으로 세고 표시. 코드 규칙: 검
 web.fetch:               # 외부 전송으로 세고 표시. 코드 규칙: 이 컴퓨터·내부 네트워크 주소, 주소에 개인 정보면 매번 승인
   "*": allow
 
+papers.search:           # 논문 찾기 (OpenAlex·arXiv, 키 없음). 외부 전송으로 세고 웹 검색과 같은 개인 정보 검사
+  "*": allow
+
 remote.gpu:              # 공유 서버 GPU 상태 (읽기만). 다른 사람 프로세스는 몇 개인지만
   "*": allow
 

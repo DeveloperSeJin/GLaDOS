@@ -34,6 +34,7 @@ from glados.config import WebConfig
 from glados.core import events as ev
 from glados.core.events import Event
 from glados.hands import HandContext, Tool, ToolError, tool_error
+from glados.hands.papers import papers_tools
 from glados.hands.docs import pdf_bytes_text
 from glados.safety.privacy import is_local_host
 
@@ -91,6 +92,9 @@ class Sent:
     task: str = ""
 
 
+SEARCH_TOOLS = ("web.search", "papers.search")   # 머리글 칩의 "웹 검색" 수에 드는 것
+
+
 class Egress:
     """이 세션에서 이 컴퓨터 밖으로 보낸 것. 보내기 직전에 적는다 (실패해도 이미 나간 것으로 센다).
     logs/egress.jsonl에도 한 줄씩 (GLaDOS 안전장치 폴더라 GLaDOS가 고칠 수 없다)."""
@@ -117,7 +121,7 @@ class Egress:
     def counts(self) -> tuple[int, int]:
         """(외부 전송, 그중 웹 검색)."""
         with self._lock:
-            return len(self.items), sum(1 for s in self.items if s.tool == "web.search")
+            return len(self.items), sum(1 for s in self.items if s.tool in SEARCH_TOOLS)
 
     def recent(self, n: int = 50) -> list[Sent]:
         with self._lock:
@@ -256,6 +260,8 @@ class SearXNG(Backend):
             r = client.get(f"{self.base}/search", params=params, timeout=SEARCH_TIMEOUT_S)
         except httpx.TimeoutException:
             raise tool_error("tool.web_timeout", host=self.host, seconds=int(SEARCH_TIMEOUT_S)) from None
+        except httpx.ConnectError:                     # 이 컴퓨터의 SearXNG가 꺼져 있음: 켜는 법을 알려 준다
+            raise tool_error("tool.web_searxng_down", url=self.base) from None
         except httpx.HTTPError as e:
             raise tool_error("tool.web_unreachable", host=self.host, detail=f"{type(e).__name__}: {e}"[:200]) from None
         if r.status_code == 403:
@@ -922,4 +928,4 @@ def web_tools(hctx: HandContext) -> list[Tool]:
             fetch,
             timeout_s=90,
         ),
-    ]
+    ] + papers_tools(hctx, sent)                       # 논문 찾기 (M6.5): 같은 외부 전송 기록을 쓴다
