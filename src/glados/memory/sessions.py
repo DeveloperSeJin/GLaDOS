@@ -3,6 +3,8 @@
 세션 하나 = 대화 하나 (GLaDOS를 켜거나 /new 한 뒤부터). 작업이 끝날 때마다 그 턴(연구원님 말, 걸음, 도구 결과,
 답, 작업 메모)을 저장한다. 다시 켜면 /resume 이나 말("어제 하던 거 이어서")로 지난 세션을 불러와 이어 간다.
 첫 작업이 끝나야 세션이 생긴다 (빈 세션은 남기지 않음).
+'!명령'만 있는 세션은 목록·이어하기에서 뺀다 (M6.6: "!git status"가 지난 대화로 뜨던 문제). 제목은 첫 요청
+('!명령' 말고). 저장은 그대로 한다.
 
 이 컴퓨터에만 남는다. 기억 속 글은 영어(엔진 안쪽), 연구원님 말만 쓴 그대로다 (core/context.py).
 여러 스레드(TUI 작업 스레드, 화면)에서 쓴다: 잠금 하나로 차례대로.
@@ -47,6 +49,12 @@ def _fold(text: str) -> str:
 def _title(request: str) -> str:
     line = " ".join(request.split())
     return line if len(line) <= TITLE_MAX else line[:TITLE_MAX - 1] + "…"
+
+
+# 세션 행. 제목이 '!명령'이면 '!명령'이 아닌 첫 요청으로 (없으면 NULL: 명령만 있는 세션)
+_ROW = ("SELECT s.id, s.started, s.last, CASE WHEN substr(s.title, 1, 1) != '!' THEN s.title ELSE "
+        "(SELECT t.request FROM turns t WHERE t.session_id = s.id AND substr(t.request, 1, 1) != '!' "
+        "ORDER BY t.idx LIMIT 1) END AS talk, s.count FROM sessions s")
 
 
 def _turn(data: str) -> Turn:
@@ -95,18 +103,21 @@ class SessionStore:
     # ------------------------------------------------------------------
     @staticmethod
     def _info(row: tuple) -> SessionInfo:
-        return SessionInfo(row[0], row[1], row[2], row[3] or "", int(row[4] or 0))
+        return SessionInfo(row[0], row[1], row[2], _title(row[3] or ""), int(row[4] or 0))
 
     def get(self, sid: str) -> SessionInfo | None:
         with self._lock:
-            row = self.db.execute("SELECT id, started, last, title, count FROM sessions WHERE id = ?", (sid,)).fetchone()
+            row = self.db.execute(f"SELECT * FROM ({_ROW}) WHERE id = ?", (sid,)).fetchone()
+            if row is not None and row[3] is None:      # 명령만 있는 세션: 저장된 제목 그대로
+                title = self.db.execute("SELECT title FROM sessions WHERE id = ?", (sid,)).fetchone()[0]
+                row = (*row[:3], title, row[4])
         return self._info(row) if row else None
 
     def recent(self, n: int = LIST_MAX, exclude: str = "") -> list[SessionInfo]:
-        """최근에 쓴 것부터 (지금 세션은 빼고, 빈 세션도 빼고)."""
+        """최근에 쓴 것부터 (지금 세션, 빈 세션, '!명령'만 있는 세션은 빼고)."""
         with self._lock:
             rows = self.db.execute(
-                "SELECT id, started, last, title, count FROM sessions WHERE id != ? AND count > 0 "
+                f"SELECT * FROM ({_ROW}) WHERE id != ? AND count > 0 AND talk IS NOT NULL "
                 "ORDER BY last DESC, id DESC LIMIT ?", (exclude, n)).fetchall()
         return [self._info(r) for r in rows]
 

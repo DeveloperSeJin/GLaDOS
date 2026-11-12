@@ -17,7 +17,7 @@ from glados.core import events as ev
 from glados.core.loop import OBS_LIMIT
 from glados.hands import HandContext, ToolError
 from glados.hands import web
-from glados.hands.web import Egress, html_text, normalize_url, xml_text
+from glados.hands.web import NO_SEARCH_HINT, Egress, html_text, normalize_url, xml_text
 from test_fs import make_pdf
 
 ARTICLE = """<!doctype html><html><head><title>Paper X | Site</title>
@@ -233,7 +233,7 @@ def test_search_errors_say_what_to_fix(site, tmp_path):
     tools, hctx, _ = hands(tmp_path, "")
     with pytest.raises(ToolError) as e:
         tools["web.search"].run({"query": "x"})
-    assert e.value.key == "tool.web_off" and "[web] search" in str(e.value)
+    assert e.value.key == "tool.web_off" and "[web] search" in str(e.value) and NO_SEARCH_HINT in str(e.value)
     assert hctx.egress.counts() == (0, 0)                                           # 보내지 않았으면 세지 않는다
 
     tools, hctx, _ = hands(tmp_path, "tavily", {})
@@ -245,14 +245,18 @@ def test_search_errors_say_what_to_fix(site, tmp_path):
     with pytest.raises(ToolError) as e:
         tools["web.search"].run({"query": "x"})
     assert e.value.key == "tool.web_auth" and e.value.params["status"] == 401
+    # M6.6: 검색을 못 하면 아는 것은 답하되 확인 안 했다고 (모델에게만 붙는 말, 화면은 키로)
+    assert str(e.value).endswith(NO_SEARCH_HINT) and "not checked on the web" in NO_SEARCH_HINT
 
     tools, _, _ = hands(tmp_path, "tavily", {"TAVILY_API_KEY": "tvly-test"})
     with pytest.raises(ToolError) as e:
         tools["web.search"].run({"query": "quota"})
     assert e.value.key == "tool.web_quota" and e.value.params["status"] == 432
+    assert NO_SEARCH_HINT in str(e.value)
     for bad in ({"query": "  "}, {"query": "x" * 401}, {"query": "x", "time_range": "decade"}):
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError) as e:
             tools["web.search"].run(bad)
+        assert NO_SEARCH_HINT not in str(e.value)                                  # 검색어를 고칠 일에는 붙이지 않는다
 
     tools, _, _ = hands(tmp_path, "searxng", searxng=site.base + "/searxng-html-only")
     with pytest.raises(ToolError) as e:

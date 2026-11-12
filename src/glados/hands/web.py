@@ -295,6 +295,12 @@ class Ollama(Backend):
 BACKENDS: dict[str, type[Backend]] = {"tavily": Tavily, "brave": Brave, "searxng": SearXNG, "ollama": Ollama}
 
 
+# 검색을 못 할 때 (설정 없음, 키 없음, 한도, 연결 실패) 모델에게: 아는 것은 답하되 확인 안 했다고 (M6.6).
+# 규칙 대신 그때만 붙는 말이라 프롬프트 몫을 쓰지 않는다
+NO_SEARCH_HINT = ("Without search, still answer from what you already know if you can, and say it was not checked "
+                  "on the web and may be out of date.")
+
+
 def make_backend(web: WebConfig, env: Any) -> Backend:
     """설정대로 검색을 맡길 곳. 못 쓰면 도구 오류 (모델이 연구원님께 그대로 전한다)."""
     if not web.search:
@@ -888,10 +894,13 @@ def web_tools(hctx: HandContext) -> list[Tool]:
             raise tool_error("tool.web_query_long", count=len(query))
         count = max(1, min(MAX_RESULTS, _int(args.get("max_results"), web.results)))
         time_range = _time_range(args.get("time_range"))
-        backend = make_backend(web, env())
-        sent("web.search", backend.host, query + (f" (past {time_range})" if time_range else ""), backend.label)
-        with httpx.Client(headers={"User-Agent": UA}) as client:
-            hits, note = backend.search(client, query, count, time_range)
+        try:
+            backend = make_backend(web, env())
+            sent("web.search", backend.host, query + (f" (past {time_range})" if time_range else ""), backend.label)
+            with httpx.Client(headers={"User-Agent": UA}) as client:
+                hits, note = backend.search(client, query, count, time_range)
+        except ToolError as e:
+            raise ToolError(f"{e} {NO_SEARCH_HINT}", e.key, **e.params) from None
         return format_hits(backend.label, backend.host, query, time_range, hits, note)
 
     def fetch(args: dict[str, Any]) -> str:

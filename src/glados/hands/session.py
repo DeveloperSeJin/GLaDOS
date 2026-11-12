@@ -36,7 +36,7 @@ def session_tools(hctx: HandContext) -> list[Tool]:
                     "read files or logs again if you need details.")
 
         tools.append(Tool("session.resume",
-                          "continue an earlier conversation (query: words from it; empty = latest)",
+                          "continue an earlier conversation (query: the Researcher's own words for it; empty = latest)",
                           {"type": "object", "properties": {"query": {"type": "string"}}},
                           resume, timeout_s=15))
 

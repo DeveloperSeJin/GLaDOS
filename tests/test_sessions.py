@@ -67,6 +67,24 @@ def test_store_keeps_turns_in_order_and_lists_recent(tmp_path):
     store.close()
 
 
+def test_command_only_sessions_are_not_listed(tmp_path):
+    """M6.6: '!명령'만 있는 대화는 지난 대화 목록·찾기·이어하기 카드에 넣지 않는다 (저장은 한다).
+    명령으로 시작했다가 말로 이어 간 대화는 제목을 첫 요청으로."""
+    store = SessionStore(tmp_path)
+    a = store.new("find the contract", now=1000.0)
+    store.append(a, Turn("find the contract", answer="Found 2025_contract.pdf."), now=1001.0)
+    b = store.new("!git status", now=2000.0)
+    store.append(b, Turn("!git status", answer="(This is the output of a command the Researcher ran directly.)"), now=2001.0)
+    c = store.new("!dir", now=3000.0)
+    store.append(c, Turn("!dir", answer="(command output)"), now=3001.0)
+    store.append(c, Turn("이 폴더에서 제일 큰 파일은?", answer="model.bin, 2.1 GB."), now=3002.0)
+    assert [s.id for s in store.recent()] == [c, a]
+    assert store.recent()[0].title == "이 폴더에서 제일 큰 파일은?"
+    assert store.find("").id == c and store.find("git status") is None and store.find("contract").id == a
+    assert store.get(b).title == "!git status" and len(store.turns(b)) == 1              # 저장은 그대로
+    store.close()
+
+
 def test_recap_lists_recent_tasks(tmp_path):
     store = SessionStore(tmp_path)
     sid = store.new("first", now=0.0)
@@ -110,11 +128,12 @@ def test_sessions_survive_a_restart_and_resume_by_number(tmp_path):
 
 
 def test_prompt_lists_three_recent_conversations_rule_and_marks_examples(tmp_path):
-    """M6.1: 가장 최근 대화가 엉뚱한 것이어도(!git status) 모델이 고를 수 있게 최근 세 개. 지난 일은 먼저 session.resume,
-    프롬프트의 예시는 지난 일이 아니라고 표시 (4b 모델이 파일 찾기 예시를 "아까 한 일"로 따라 했음)."""
+    """M6.1: 최근 대화 세 개를 보여 모델이 고르게. 지난 일은 먼저 session.resume, 프롬프트의 예시는 지난 일이 아니라고
+    표시 (4b 모델이 파일 찾기 예시를 "아까 한 일"로 따라 했음). M6.6: '!명령'만 있는 대화는 목록에 넣지 않는다."""
     home = tmp_path / "home"
-    a, _ = open_app(home, FakeLLM([answer("A plan."), answer("Four."), answer("Done.")]), os_name=osinfo.current_os())
-    for request in ("plan the ablation study", "what is two plus two", "x" * 80):
+    a, _ = open_app(home, FakeLLM([answer("A plan."), answer("Four."), answer("Done."), answer("Hello.")]),
+                    os_name=osinfo.current_os())
+    for request in ("plan the ablation study", "what is two plus two", "x" * 80, "say hello"):
         a.forget()
         a.ask_task(request)
     a.forget()
@@ -127,7 +146,8 @@ def test_prompt_lists_three_recent_conversations_rule_and_marks_examples(tmp_pat
         prompt = b.system_prompt()
         line = next(ln for ln in prompt.splitlines() if "Earlier conversations" in ln)
         listed = line.split("Earlier conversations (newest first): ", 1)[1]
-        assert listed.count('" (1 task)') == 3 and listed.index('"!echo hello"') < listed.index('"xxx')
+        assert listed.count('" (1 task)') == 3 and "echo" not in listed                    # 명령만 있는 대화는 빼고
+        assert listed.index('"say hello"') < listed.index('"xxx')
         assert '"what is two plus two" (1 task)' in listed and "ablation" not in listed      # 넷째는 빠진다
         assert '"' + "x" * 59 + '…"' in listed                                      # 긴 제목은 줄임
         assert 'Earlier work not in this conversation ("아까", "어제", "이어서"): call session.resume first.' in prompt
@@ -138,6 +158,18 @@ def test_prompt_lists_three_recent_conversations_rule_and_marks_examples(tmp_pat
         b.close()
 
 
+def test_resume_query_keeps_the_researchers_words(tmp_path):
+    """M6.6: "얼룩말 프로젝트 하던거 이어서 하자"에 4b 모델이 query를 "Equestria"로 바꿔 찾음. 저장된 말은 연구원님이
+    쓴 그대로라, 찾기 낱말도 그대로 (계약의 영어 규칙 예외, 도구 설명)."""
+    a, _ = open_app(tmp_path / "home")
+    try:
+        assert "- session.resume(query?): continue an earlier conversation (query: the Researcher's own words for " \
+               "it; empty = latest)" in a.tools.describe()
+        assert "tool arguments (except memory.note text and session.resume query)" in a.system_prompt()
+    finally:
+        a.close()
+
+
 def test_prompt_rules_for_known_facts_statements_and_note_language(tmp_path):
     """M6.2: 이미 아는 것(시각·서버·메모)은 도구 없이, 메모는 연구원님 말 그대로.
     "말만 한 것에는 짧게" 규칙은 넣지 않는다 (연구원님: 하드코딩)."""
@@ -146,7 +178,7 @@ def test_prompt_rules_for_known_facts_statements_and_note_language(tmp_path):
         prompt = a.system_prompt()
         assert "- If these instructions already say it (time, servers, notes), answer without tools." in prompt
         assert "only shares something" not in prompt
-        assert "tool arguments (except memory.note text)" in prompt
+        assert "tool arguments (except memory.note text and session.resume query)" in prompt
         assert "in their own words and language" in a.tools.describe()
     finally:
         a.close()
@@ -349,6 +381,6 @@ def test_prompt_budget_at_16k_with_notes(tmp_path, num_ctx):
         for i in range(30):
             a.notes.add(f"note {i}: keep the batch size at 32 for the resnet runs")
         full = a.history_budget()
-        assert empty >= 2600 and 0 < empty - full <= 650 and full > 1950
+        assert empty >= 2550 and 0 < empty - full <= 650 and full > 1900
     finally:
         a.close()
