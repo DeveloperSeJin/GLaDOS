@@ -37,6 +37,15 @@ search = ""
 searxng_url = "http://localhost:8888"   # search = "searxng"일 때 (settings.yml의 search: formats에 json을 켜야 함)
 results = 5                             # 검색 한 번에 받을 결과 수 (1~10)
 
+[index]
+# 내용 색인: folders.toml search_default의 폴더(다운로드·문서·바탕 화면)에 있는 pdf·docx·글 파일의 글을
+# GLaDOS가 켜져 있는 동안 뒤에서 미리 읽어 둔다 (cache/index.sqlite, 이 컴퓨터 밖으로 나가지 않음).
+# "내용에서 찾아줘"가 파일을 열지 않고 바로 찾는다. 상태는 /index
+enabled = true
+# 뜻으로 찾기: 낱말이 달라도 뜻이 가까운 문서 ("위약금"으로 penalty clause). 처음 한 번 터미널에서
+# ollama pull qwen3-embedding:0.6b (639MB). 비우면("") 낱말 색인만
+embed_model = "qwen3-embedding:0.6b"
+
 [privacy]
 # 웹으로 나가는 글(검색어, 주소)에 이 이름이 있으면 먼저 묻는다. 이메일·전화번호·파일 경로·키 모양,
 # 이 대화에서 읽은 파일의 글은 따로 적지 않아도 묻는다

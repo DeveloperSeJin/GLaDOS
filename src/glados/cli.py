@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -30,11 +31,13 @@ from glados.core.context import (
 )
 from glados.core.events import Event
 from glados.core.guards import DEFAULT_GUARDS, needs_evidence
-from glados.core.llm import Cancelled, LLMError, OllamaClient, OllamaUnavailable
+from glados.core.llm import Cancelled, Embedder, LLMError, OllamaClient, OllamaUnavailable
 from glados.core.loop import TaskResult, clip_output, run_task
 from glados.core.prompts import build_system_prompt, reply_note
 from glados.core.translate import Glossary, Translator, reply_language
 from glados.hands import HandContext, ToolError, load_hands
+from glados.hands import fs as fs_hands
+from glados.hands import index as content_index
 from glados.hands import shell
 from glados.hands.web import Egress, search_status
 from glados.i18n import localized, t
@@ -220,6 +223,8 @@ class App:
             servers=list(cfg.servers),                                          # 원격 손 (M4): servers.toml
             sessions=SessionStore(cfg.home),                                    # 대화 세션 (M6): 이어하기
             notes=Notes(cfg.home, cfg.language),                                # MEMORY.md (M6): "기억해"
+            embedder=(Embedder(cfg.model.host, cfg.index.embed_model)            # 뜻으로 찾기 (M7.2): 질문 벡터
+                      if cfg.index.enabled and cfg.index.embed_model else None),
         )
         self.translator = Translator(self.llm, keep=[s.alias for s in cfg.servers])   # 영어 답 -> 연구원님의 언어 (서버 이름은 그대로)
         self.tools = load_hands(self.os, self.hctx)
@@ -230,12 +235,98 @@ class App:
         self.notes: Notes = self.hctx.notes
         self.context_chars = limit_chars(cfg.model.num_ctx)
         self.runner = self.hctx.runner                    # 서버 실행 (M5). 서버가 없으면 None
+        self.indexer: content_index.IndexProcess | None = None   # 내용 색인 (M7.1): start_background()가 띄운다
         if self.runner is not None:
             self.runner.on_notice = None                  # 화면이 준비되면 watch()가 붙인다 (그 전 알림은 모아 둠)
             # 코드를 읽어 메모리를 추정하고 지표 형식을 정하는 모델: 따로 연결 (화면의 멈춤·토큰 표시와 섞이지 않게)
             self.runner.llm = OllamaClient(cfg.model) if isinstance(self.llm, OllamaClient) else self.llm
             self.runner.exp_root = Path(self.workspace()) / "experiments"   # 실험 세션 폴더 (표·그래프·요약)
             self.runner.expire_waiting()                  # 지난 세션의 대기 줄은 취소 (켜져 있는 동안만 기다림)
+
+    def start_background(self) -> None:
+        """내용 색인 프로세스 (M7.1). 줄 화면·TUI를 열 때 부른다 (시험에서 App만 만들면 띄우지 않는다)."""
+        if not self.cfg.index.enabled or self.indexer is not None or not content_index.fts5_ok():
+            return
+        try:
+            roots, _ = fs_hands._resolve_roots(list(self.cfg.search_default) or ["~/Downloads", "~/Documents", "~/Desktop"],
+                                               self.hctx)
+        except ToolError:
+            return
+        if roots:
+            try:
+                self.indexer = content_index.IndexProcess(self.cfg.home, [str(r) for r in roots], self.places,
+                                                          host=self.cfg.model.host, embed_model=self.cfg.index.embed_model)
+            except OSError:
+                self.indexer = None
+
+    def index_lines(self) -> list[str]:
+        """/index: 내용 색인 상태 (M7.1)."""
+        if not self.cfg.index.enabled:
+            return [t("index.off")]
+        if not content_index.fts5_ok():
+            return [t("index.no_fts")]
+        idx = content_index.open_index(self.cfg.home)
+        if idx is None:
+            return [t("index.none")]
+        try:
+            st = idx.stats()
+            running = idx.running()
+        finally:
+            idx.close()
+        by = st["by_status"]
+        ok, scanned, locked = by.get("ok", 0), by.get("no_text", 0), by.get("locked", 0)
+        lines = [t("index.head", files=st["files"], ok=ok, scanned=scanned, locked=locked,
+                   failed=st["files"] - ok - scanned - locked)]
+        state = st.get("state", "")
+        if not running:
+            lines.append(t("index.stopped"))
+        elif state == "reading":
+            lines.append(t("index.reading", done=st.get("pass_done", 0), total=st.get("pass_total", 0)))
+        elif state == "walking":
+            lines.append(t("index.walking"))
+        if state in ("idle", "stopped") or not running:
+            try:
+                when = datetime.fromtimestamp(float(st.get("pass_finished") or 0))
+                if when.year > 2000:
+                    lines.append(t("index.idle", when=when.strftime("%m-%d %H:%M"), seconds=st.get("pass_seconds", "?")))
+            except (TypeError, ValueError, OSError):
+                pass
+        if st["partial"]:
+            lines.append(t("index.partial", count=st["partial"]))
+        lines += self.meaning_lines(st)
+        try:
+            folders = ", ".join(json.loads(st.get("roots") or "[]"))
+        except ValueError:
+            folders = ""
+        if folders:
+            lines.append(t("index.folders", folders=folders))
+        path = content_index.index_path(self.cfg.home)
+        try:
+            size = sum(f.stat().st_size for f in path.parent.glob(path.name + "*"))   # -wal, -shm 포함
+        except OSError:
+            size = 0
+        lines.append(t("index.file", path=path, size=fs_hands._fmt_size(size)))
+        if st.get("last_error"):
+            lines.append(t("index.error", detail=st["last_error"]))
+        return lines
+
+    def meaning_lines(self, st: dict) -> list[str]:
+        """/index의 뜻으로 찾기 줄 (M7.2)."""
+        model = self.cfg.index.embed_model
+        if not model:
+            return [t("index.meaning_off")]
+        vec = st.get("vectors", {})
+        total = sum(vec.values())
+        ready = vec.get(model, 0)
+        state = st.get("embed_state", "")
+        if state == "missing" and ready < total:
+            return [t("index.meaning_missing", model=model)]
+        lines = [t("index.meaning_ready", ready=ready, total=total, model=model)]
+        if state == "waiting" and ready < total:
+            lines.append(t("index.meaning_waiting"))
+        elif state == "error" and st.get("embed_error"):
+            lines.append(t("index.error", detail=st["embed_error"]))
+        return lines
 
     def system_prompt(self) -> str:
         """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록)."""
@@ -351,6 +442,8 @@ class App:
         def audit(call: ToolCall, d: Decision, who: str) -> None:
             self.policy_log.write(call.tool, call.args, d.verdict, d.rule, who, task_id)
 
+        if self.indexer is not None:
+            self.indexer.busy(True)                      # 작업 중에는 색인이 모델(GPU)을 쓰지 않는다 (M7.2)
         try:
             result = run_task(
                 request,
@@ -387,6 +480,8 @@ class App:
             return None
         finally:
             self.hctx.emit = None
+            if self.indexer is not None:
+                self.indexer.busy(False)
             self.apply_resume()                          # session.resume을 불렀으면 그 대화를 기억에 (이번 턴은 그 뒤에)
         self.task_log.finish(task_id, result.status)
         self.remember(self.memory.add(request, result))
@@ -558,6 +653,9 @@ class App:
                 s.say(line)
         elif cmd == "/runs":
             for line in self.runs_lines():
+                s.say(line)
+        elif cmd == "/index":
+            for line in self.index_lines():
                 s.say(line)
         elif cmd in LATER:
             s.say(t("command.later", cmd=cmd, stage=LATER[cmd]))
@@ -813,6 +911,11 @@ class App:
         return 0
 
     def close(self) -> None:
+        if self.indexer is not None:
+            self.indexer.stop()                          # 색인 프로세스도 끝낸다 (표준 입력을 닫음)
+            self.indexer = None
+        if self.hctx.embedder is not None:
+            self.hctx.embedder.close()
         self.task_log.close()
         self.sessions.close()
         if self.runner is not None:
@@ -881,6 +984,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not app.check_model():
             return 1
+        if not args:
+            app.start_background()                       # 한 줄 실행(glados "...")에서는 색인을 띄우지 않는다
         if args:
             result = app.ask_task(" ".join(args))
             return 0 if result is not None and result.status == "done" else 1

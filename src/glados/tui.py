@@ -1752,6 +1752,7 @@ def run_tui(cfg: Config, first_run: bool = False, notes: list[str] | None = None
     moved = app.engine.leave_safety_cwd()        # 소스 폴더에서 열었으면 작업 공간으로 (파일·명령이 막히지 않게)
     if moved:
         app.notes.append(t("cwd.moved", path=moved))
+    app.engine.start_background()                # 내용 색인 프로세스 (M7.1)
     try:
         app.run()
     finally:

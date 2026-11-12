@@ -31,7 +31,7 @@ BODY_CHARS = 150_000          # 내용 찾기 글 한도
 MAX_BYTES = 80_000_000        # 이보다 큰 파일은 내용을 보지 않는다
 FILE_BUDGET_S = 8.0           # 한 파일에 쓰는 시간 (넘으면 읽은 데까지)
 VERSION = 1                   # 뽑는 방법이 바뀌면 올린다 (캐시를 다시 채움)
-DOC_EXTS = ("pdf", "docx")
+DOC_EXTS = ("pdf", "docx", "hwp", "hwpx")         # hwp·hwpx는 M7.3 (hands/hwp.py)
 
 
 @dataclass
@@ -65,8 +65,10 @@ def extract(path: Path, deep: bool = False) -> Doc:
         doc = _pdf(path, deep)
     elif ext == "docx":
         doc = _docx(path)
+    elif ext in ("hwp", "hwpx"):
+        doc = _hwp(path)
     else:
-        return Doc(str(path), "error", detail=f"not a pdf or docx: {ext}")
+        return Doc(str(path), "error", detail=f"not a pdf, docx, or hwp: {ext}")
     if doc.status == "ok" and len(re.sub(r"\s", "", doc.front + doc.body + doc.back)) < 3:   # 스캔한 그림뿐
         doc.status = "no_text"
     for name in ("title", "creator", "front", "back", "body", "detail"):     # 깨진 글자 (M6.2)
@@ -173,6 +175,90 @@ def _docx(path: Path) -> Doc:
     return doc
 
 
+@dataclass
+class FullText:
+    """색인용 글 전체 (M7.1). pdf는 쪽 사이에 PAGE_BREAK (몇 쪽에서 나왔는지 말할 수 있게)."""
+    status: str = "ok"            # ok | no_text | locked | error | too_large
+    pages: int = 0                # pdf 쪽 수
+    read_pages: int = 0           # 읽은 쪽 수 (시간·글 한도로 덜 읽었으면 pages보다 작다)
+    title: str = ""
+    text: str = ""
+    detail: str = ""
+
+
+PAGE_BREAK = "\f"
+
+
+def full_text(path: Path, budget_s: float = 30.0, max_chars: int = 400_000) -> FullText:
+    """pdf·docx의 글 전체 (색인용). 실패해도 예외 대신 status로."""
+    ext = path.suffix.lower().lstrip(".")
+    try:
+        if path.stat().st_size > MAX_BYTES:
+            return FullText("too_large")
+    except OSError as e:
+        return FullText("error", detail=str(e)[:200])
+    if ext == "pdf":
+        out = _pdf_full(path, budget_s, max_chars)
+    elif ext == "docx":
+        doc = _docx(path)
+        if doc.status != "ok":
+            return FullText(doc.status, detail=doc.detail)
+        out = FullText("ok", title=doc.title, text=doc.text()[:max_chars])
+    elif ext in ("hwp", "hwpx"):
+        from glados.hands import hwp
+
+        h = hwp.read(path, max_chars)
+        out = FullText(h.status, title=h.title, text=h.text, detail=h.detail)
+    else:
+        return FullText("error", detail=f"not a document: {ext}")
+    if out.status == "ok" and len(re.sub(r"\s", "", out.text)) < 3:      # 스캔한 그림뿐
+        out.status = "no_text"
+    out.title, out.text, out.detail = clean(out.title), clean(out.text), clean(out.detail)
+    return out
+
+
+def _pdf_full(path: Path, budget_s: float, max_chars: int) -> FullText:
+    from pypdf import PdfReader
+
+    start = time.monotonic()
+    try:
+        reader = PdfReader(str(path))
+        if reader.is_encrypted:
+            try:
+                opened = reader.decrypt("")
+            except Exception:
+                opened = 0
+            if not opened:
+                return FullText("locked")
+        n = len(reader.pages)
+        title = str((reader.metadata or {}).get("/Title") or "").strip()
+    except Exception as e:
+        return FullText("error", detail=f"{type(e).__name__}: {e}"[:200])
+    parts: list[str] = []
+    size = 0
+    for i in range(n):
+        if time.monotonic() - start > budget_s or size >= max_chars:
+            break
+        try:
+            text = reader.pages[i].extract_text() or ""
+        except Exception:
+            text = ""
+        parts.append(text.replace(PAGE_BREAK, " "))
+        size += len(text) + 1
+    return FullText("ok", pages=n, read_pages=len(parts), title=title, text=PAGE_BREAK.join(parts)[:max_chars])
+
+
+def _hwp(path: Path) -> Doc:
+    from glados.hands import hwp
+
+    h = hwp.read(path)
+    if h.status != "ok":
+        return Doc(str(path), h.status, detail=h.detail)
+    doc = from_text(str(path), h.text)
+    doc.title, doc.detail = h.title, h.detail
+    return doc
+
+
 def from_text(path: str, text: str) -> Doc:
     """글 전체가 있는 문서 (DOCX, 글 파일): 앞·끝·가운데로 나눠 PDF와 같은 모양으로."""
     text = clean(text)
@@ -190,6 +276,9 @@ SCHEMA = (
     """CREATE TABLE IF NOT EXISTS answers (
     key TEXT, question TEXT, model TEXT, size INTEGER, mtime INTEGER, answer TEXT, why TEXT, used REAL,
     PRIMARY KEY (key, question, model))""",
+    """CREATE TABLE IF NOT EXISTS ocr (
+    key TEXT, page INTEGER, model TEXT, size INTEGER, mtime INTEGER, text TEXT, used REAL,
+    PRIMARY KEY (key, page, model))""",
 )
 COLUMNS = ("status", "pages", "title", "creator", "front", "back", "body", "deep", "detail")
 
@@ -258,6 +347,22 @@ class DocCache:
     def put_answer(self, path: Path, st: os.stat_result, question: str, model: str, answer: str, why: str) -> None:
         self._write("INSERT OR REPLACE INTO answers VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (self._key(path), question, model, st.st_size, st.st_mtime_ns, answer, why, time.time()))
+
+    def ocr(self, path: Path, st: os.stat_result, model: str) -> dict[int, str]:
+        """이 파일에서 글자 인식으로 읽어 둔 쪽들 {쪽(0부터): 글} (파일이 그대로일 때만)."""
+        if self.con is None:
+            return {}
+        try:
+            with self._lock:
+                rows = self.con.execute("SELECT page, text FROM ocr WHERE key = ? AND model = ? AND size = ? AND mtime = ?",
+                                        (self._key(path), model, st.st_size, st.st_mtime_ns)).fetchall()
+        except (sqlite3.Error, ValueError):
+            return {}
+        return {int(r[0]): str(r[1]) for r in rows}
+
+    def put_ocr(self, path: Path, st: os.stat_result, page: int, model: str, text: str) -> None:
+        self._write("INSERT OR REPLACE INTO ocr VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (self._key(path), page, model, st.st_size, st.st_mtime_ns, text, time.time()))
 
     def close(self) -> None:
         if self.con is not None:

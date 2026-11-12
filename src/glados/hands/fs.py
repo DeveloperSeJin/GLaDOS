@@ -22,6 +22,7 @@ from __future__ import annotations
 import codecs
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 import unicodedata
@@ -34,6 +35,8 @@ from typing import Any, Callable
 from glados.core.llm import FormatError, LLMError
 from glados.core.translate import is_foreign, split_name, stem
 from glados.hands import HandContext, Tool, ToolError, docs, tool_error
+from glados.hands import index as content_index
+from glados.hands import ocr
 from glados.safety.locations import Places, classify, normalize
 
 KINDS: dict[str, tuple[str, ...]] = {
@@ -50,8 +53,9 @@ KINDS: dict[str, tuple[str, ...]] = {
     "image": ("png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"),
 }
 TEXT_EXTS = set(KINDS["text"]) | set(KINDS["code"]) | {"markdown", "html", "htm", "xml", "css", "bib", "srt", "vtt", "svg"}
-DOC_EXTS = {"pdf", "docx"}
-NOT_YET = {"hwp", "hwpx", "doc", "xlsx", "xls", "pptx", "ppt"}       # 아직 못 읽는 종류 (v1)
+DOC_EXTS = {"pdf", "docx", "hwp", "hwpx"}                         # hwp·hwpx는 M7.3
+NOT_YET = {"doc", "xlsx", "xls", "pptx", "ppt"}                    # 아직 못 읽는 종류 (v1)
+IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"}   # fs.read가 글자 인식으로 (M7.3)
 CANNOT_WRITE = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "hwp", "hwpx"}
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache", ".tox", ".mypy_cache", ".pytest_cache", "site-packages"}
 
@@ -74,6 +78,9 @@ CONTENT_MAX_BYTES = 2_000_000
 CLOSEST_LIMIT = 10            # 다 맞는 파일이 없을 때 대신 보여 줄 가장 가까운 파일 수
 CONTENT_BUDGET_S = 40.0       # 내용을 읽는 데 쓸 시간 (찾기를 시작한 때부터, 도구 시간 제한 60초 안에서)
 TEXT_BUDGET = 3300            # 결과 글 길이 (루프는 4000자가 넘으면 가운데를 자른다)
+MEANING_SHOWN = 5             # 뜻으로 찾기: 보여 줄 파일 수 (M7.2)
+MIN_SIMILARITY = 0.40         # 뜻으로 찾기: 이보다 덜 닮은 것은 보여 주지 않는다 (코사인, 실사용을 보고 맞춤)
+MEANING_SNIPPET = 140
 DOC_CACHE = "doctext.sqlite"  # GLADOS_HOME/cache 안: 뽑은 글과 살펴본 답 (docs.py)
 INSPECT_BATCH = 6             # fs.inspect: 모델에게 한 번에 보여 줄 파일 수
 INSPECT_CHARS = 700           # fs.inspect: 파일마다 보여 줄 첫머리 길이
@@ -89,6 +96,10 @@ READ_DEFAULT = 3000           # 루프가 관찰을 자르는 길이(4000자)보
 READ_MAX = 3600
 READ_MAX_BYTES = 30_000_000
 PDF_DEFAULT_PAGES = 50
+OCR_DEFAULT_PAGES = 2         # 스캔한 pdf를 쪽 지정 없이 읽으면 앞 몇 쪽만 글자 인식 (M7.3)
+OCR_MAX_PAGES = 4             # 한 번에 새로 글자 인식할 쪽 수 (쪽마다 20초쯤)
+OCR_BUDGET_S = 150.0          # 글자 인식에 쓸 시간 (fs.read 시간 제한 안에서)
+READ_TIMEOUT_S = 240          # fs.read 시간 제한 (글자 인식 때문에 길게)
 
 # Windows: 클라우드에만 있는 파일(OneDrive 등) 속성. 내용을 읽으면 내려받아진다
 CLOUD_ATTRS = 0x1000 | 0x40000 | 0x400000   # OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS
@@ -283,6 +294,8 @@ def _list_with_rg(rg: str, root: Path, exts: tuple[str, ...]) -> list[Path]:
     cmd = [rg, "--files", "--null", "--no-messages"]
     for e in exts:
         cmd += ["--iglob", f"*.{e}"]
+    for d in sorted(SKIP_DIRS):                        # 파이썬으로 훑을 때·색인과 같게 (M7.1: rg는 node_modules를 봤다)
+        cmd += ["--glob", f"!{d}"]
     cmd.append(str(root))
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=LIST_TIMEOUT_S, check=False).stdout
@@ -483,17 +496,24 @@ def search(args: dict[str, Any], hctx: HandContext) -> str:
         hits.append((rank, c))
     hits.sort(key=lambda h: (h[0], -h[1].stat.st_mtime))    # type: ignore[union-attr]  글자 그대로 맞은 것 먼저, 그다음 최근 순
 
-    found_in: list[tuple[_Candidate, str]] = []
+    found_in: list[tuple[_Candidate, str, int]] = []
     cov = _Coverage()
     if content:                                        # 내용까지: 이름이 맞지 않은 파일의 글 (pdf·docx·글 파일)
-        found_in, cov = _content_hits(_visible_files(pool, sc.visible), terms, sc.gloss, hctx, sc.fast, started)
+        files = _visible_files(pool, sc.visible)
+        from_index, rest, cov, indexed = _index_hits(files, terms, sc.gloss, hctx)   # 색인에 있는 것은 색인에서 (M7.1)
+        found_now, cov_now = _content_hits(rest, terms, sc.gloss, hctx, sc.fast, started)
+        found_in, cov = from_index + found_now, _merge(cov, cov_now)
+        taken = {content_index.file_key(c.path) for c, _, _ in found_in}
+        meaning = _meaning(query, [(c, e) for c, e in indexed if content_index.file_key(c.path) not in taken],
+                           sc.gloss, hctx)                                                      # 뜻으로 (M7.2)
 
     total = len(hits) + len(found_in)
     head = f"{total} found"
     if total > limit:
         head += f", showing {limit}"
     lines = [f"{head} (scope: {sc.label})"]
-    entries = [_hit_line(c, sc.gloss) for _, c in hits] + [_content_line(c, snip, sc.gloss) for c, snip in found_in]
+    entries = [_hit_line(c, sc.gloss) for _, c in hits] + [_content_line(c, snip, sc.gloss, page)
+                                                            for c, snip, page in found_in]
     lines += entries[:limit]
     if not total and terms:
         if sc.small:
@@ -501,10 +521,14 @@ def search(args: dict[str, Any], hctx: HandContext) -> str:
         else:
             lines.append(f"No file name matches. The scope has {len(sc.cands)} files, too many to list; narrow roots or kind.")
         if not content:
+            in_text = _index_count(_visible_files(pool, sc.visible), terms, sc.gloss, hctx)
+            if in_text:                                # 색인이 있으면 내용에도 있는지 알려 준다 (볼지는 모델이 정한다)
+                lines.append(f"The text of {in_text} file{'s' if in_text != 1 else ''} contains these words "
+                             "(content index); search again with content=true to list them.")
             lines.append(NAMES_ONLY)                   # 무엇을 볼지는 모델이 정한다
     if content:
-        lines += _coverage_lines(cov, f"pdf: first {docs.DEEP_PAGES} and last {docs.BACK_PAGES} pages; "
-                                      "docx and text files: all")
+        lines += meaning
+        lines += _coverage_lines(cov, _how(cov))
     lines += sc.notes()
     if not hits and not terms:
         lines.append("No file matches.")
@@ -525,6 +549,27 @@ class _Coverage:
     protected: int = 0
     left: int = 0                   # 시간이 모자라 못 본 것
     other: Counter = field(default_factory=Counter)    # 아직 내용을 못 읽는 종류 (hwp, xlsx, png ...)
+    indexed: int = 0                # 색인에서 본 파일 (글 전체, M7.1)
+    partial: int = 0                # 색인했지만 길어서 앞부분만 (긴 pdf)
+
+
+def _merge(a: "_Coverage", b: "_Coverage") -> "_Coverage":
+    out = _Coverage()
+    for name in ("wanted", "checked", "no_text", "locked", "failed", "too_large", "cloud", "protected", "left",
+                 "indexed", "partial"):
+        setattr(out, name, getattr(a, name) + getattr(b, name))
+    out.other = a.other + b.other
+    return out
+
+
+def _how(cov: "_Coverage") -> str:
+    now = f"pdf: first {docs.DEEP_PAGES} and last {docs.BACK_PAGES} pages; docx and text files: all"
+    if not cov.indexed:
+        return now
+    whole = "whole text" + (f"; {cov.partial} long pdfs only their first part" if cov.partial else "")
+    if cov.indexed >= cov.wanted:
+        return f"from the content index: {whole}"
+    return f"{cov.indexed} from the content index ({whole}), the rest read now ({now})"
 
 
 def _variants(term: str, gloss: dict[str, tuple[str, ...]]) -> list[str]:
@@ -604,8 +649,108 @@ def _read_contents(files: list[_Candidate], deep: bool, deadline: float, hctx: H
     return out, cov
 
 
+def _index_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tuple[str, ...]], hctx: HandContext
+                ) -> tuple[list[tuple[_Candidate, str, int]], list[_Candidate], _Coverage,
+                           list[tuple[_Candidate, content_index.Entry]]]:
+    """색인에 있고 그 뒤로 바뀌지 않은 파일은 색인에서 찾는다 (글 전체, 파일을 열지 않음).
+    나머지(색인에 없음, 바뀜, 클라우드 전용)는 돌려준다: 그 자리에서 읽는다.
+    (찾은 것, 그 자리에서 읽을 것, 본 정도, 색인에서 글을 본 파일들 — 뜻으로 찾기에 씀)"""
+    cov = _Coverage()
+    idx = content_index.open_index(hctx.home)
+    if idx is None or not files:
+        if idx is not None:
+            idx.close()
+        return [], files, cov, []
+    try:
+        entries = idx.entries([content_index.file_key(c.path) for c in files])
+        fresh: list[tuple[_Candidate, content_index.Entry]] = []
+        rest: list[_Candidate] = []
+        for c in files:
+            e = entries.get(content_index.file_key(c.path))
+            if e is not None and c.stat is not None and e.status != "cloud" and e.fresh(c.stat):
+                fresh.append((c, e))
+            else:
+                rest.append(c)
+        if not fresh:
+            return [], rest, cov, []
+        variants = [_variants(t, gloss) for t in terms]
+        matched = set(idx.match(variants))
+        out: list[tuple[_Candidate, str, int]] = []
+        for c, e in fresh:
+            cov.wanted += 1
+            cov.indexed += 1
+            if e.status == "ok":
+                cov.checked += 1
+                cov.partial += int(e.read_pages < e.pages)
+            elif e.status == "no_text":
+                cov.no_text += 1
+            elif e.status == "locked":
+                cov.locked += 1
+            elif e.status == "too_large":
+                cov.too_large += 1
+            else:
+                cov.failed += 1
+            if e.status == "ok" and e.id in matched:
+                snip, page = idx.snippet(e.id, variants[0]) if len(out) < SEARCH_MAX else ("", 0)
+                out.append((c, snip, page))
+        return out, rest, cov, [(c, e) for c, e in fresh if e.status == "ok"]
+    except sqlite3.Error:                              # 색인을 못 읽으면 예전처럼 그 자리에서
+        return [], files, _Coverage(), []
+    finally:
+        idx.close()
+
+
+def _meaning(query: str, files: list[tuple[_Candidate, content_index.Entry]], gloss: dict[str, tuple[str, ...]],
+             hctx: HandContext) -> list[str]:
+    """낱말은 달라도 질문과 뜻이 가까운 파일 (M7.2, 색인의 벡터로). 맞는지는 모델이 읽어 보고 정한다."""
+    emb = hctx.embedder
+    if emb is None or not files or not query.strip():
+        return []
+    idx = content_index.open_index(hctx.home)
+    if idx is None:
+        return []
+    try:
+        ids = [e.id for _, e in files]
+        ready = idx.vector_count(ids, emb.model)
+        if not ready:
+            return [f"Search by meaning: not ready yet (no vectors for these files; {emb.model} makes them in the "
+                    "background)."]
+        try:
+            q = emb.queries([query])[0]
+        except LLMError as e:
+            return [f"Search by meaning is unavailable: {e}"]
+        by_id = {e.id: (c, e) for c, e in files}
+        near = [n for n in idx.nearest(ids, q, emb.model) if n[1] >= MIN_SIMILARITY][:MEANING_SHOWN]
+        lines: list[str] = []
+        if near:
+            lines.append("Close in meaning (the words may differ; read before relying on them):")
+        for fid, score, start in near:
+            c, _ = by_id[fid]
+            body = idx.body(fid)
+            page = body.count(content_index.PAGE, 0, start) + 1 if content_index.PAGE in body else 0
+            piece = " ".join(body[start:start + MEANING_SNIPPET].replace(content_index.PAGE, " ").split())
+            where = f" (p.{page})" if page else ""
+            lines.append(_hit_line(c, gloss) + f' · meaning {score:.2f}{where}: "{piece}…"')
+        if ready < len(ids):
+            lines.append(f"By meaning: {ready} of {len(ids)} files have vectors so far (the rest are still being made).")
+        return lines
+    except sqlite3.Error:
+        return []
+    finally:
+        idx.close()
+
+
+def _index_count(files: list[_Candidate], terms: list[str], gloss: dict[str, tuple[str, ...]],
+                 hctx: HandContext) -> int:
+    """이름은 안 맞지만 글에 낱말이 다 있는 파일 수 (색인으로만, 파일을 열지 않음). 색인이 없으면 0."""
+    if not terms or not content_index.index_path(hctx.home).exists():
+        return 0
+    found, _, _, _ = _index_hits(files, terms, gloss, hctx)
+    return len(found)
+
+
 def _content_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tuple[str, ...]], hctx: HandContext,
-                  fast: Places, started: float) -> tuple[list[tuple[_Candidate, str]], _Coverage]:
+                  fast: Places, started: float) -> tuple[list[tuple[_Candidate, str, int]], _Coverage]:
     """낱말이 모두 글 안에 있는 파일과 그 자리 (낱말마다 따로, 영어가 아닌 낱말은 영어 뜻도)."""
     read, cov = _read_contents(files, True, started + CONTENT_BUDGET_S, hctx, fast)
     variants = [_variants(t, gloss) for t in terms]
@@ -615,12 +760,13 @@ def _content_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tu
             continue
         text = nfc(doc.text())
         if _matches(text.casefold(), variants):
-            hits.append((c, docs.snippet(text, variants[0])))
+            hits.append((c, docs.snippet(text, variants[0]), 0))
     return hits, cov
 
 
-def _content_line(c: _Candidate, snip: str, gloss: dict[str, tuple[str, ...]]) -> str:
-    return _hit_line(c, gloss) + (f' · in the text: "{snip}"' if snip else " · in the text")
+def _content_line(c: _Candidate, snip: str, gloss: dict[str, tuple[str, ...]], page: int = 0) -> str:
+    where = f" (p.{page})" if page else ""
+    return _hit_line(c, gloss) + (f' · in the text{where}: "{snip}"' if snip else f" · in the text{where}")
 
 
 def _coverage_lines(cov: _Coverage, how: str) -> list[str]:
@@ -635,6 +781,8 @@ def _coverage_lines(cov: _Coverage, how: str) -> list[str]:
         (cov.protected, "in protected locations (contents never read)")) if n]
     if unread:
         lines.append("Not read: " + ", ".join(unread) + ".")
+    if cov.no_text:
+        lines.append("Scanned pdfs have no text to search; fs.read can read them by OCR (slow, a few pages at a time).")
     if cov.other:
         kinds = ", ".join(f"{n} {ext}" for ext, n in cov.other.most_common(5))
         lines.append(f"Contents of these types cannot be read yet: {kinds}{' ...' if len(cov.other) > 5 else ''}.")
@@ -820,7 +968,7 @@ def _page_range(pages: Any, n: int) -> list[int]:
     return out
 
 
-def _read_pdf(p: Path, pages: Any) -> tuple[str, str]:
+def _read_pdf(p: Path, pages: Any, hctx: HandContext | None = None) -> tuple[str, str]:
     from pypdf import PdfReader
 
     try:
@@ -831,19 +979,149 @@ def _read_pdf(p: Path, pages: Any) -> tuple[str, str]:
     except Exception as e:
         raise tool_error("tool.pdf_open", detail=str(e)) from None
     selected = _page_range(pages, n)
-    parts = []
+    texts: dict[int, str] = {}
     for i in selected:
         try:
-            text = reader.pages[i].extract_text() or ""
+            texts[i] = (reader.pages[i].extract_text() or "").strip()
         except Exception:
-            text = "(could not extract text from this page)"
-        parts.append(f"[p.{i + 1}]\n{text.strip()}")
+            texts[i] = "(could not extract text from this page)"
+    blank = [i for i in selected if len("".join(texts[i].split())) < 3]          # 글자가 없는 쪽 (스캔)
     note = f"PDF with {n} pages"
     if pages:
         note += f", pages {pages}"
-    elif n > PDF_DEFAULT_PAGES:
+    seen: dict[int, str] = {}
+    left: list[int] = []
+    problem = ""
+    if blank and hctx is not None and ocr.can_see(hctx.llm):
+        if not pages and len(blank) == len(selected):    # 스캔한 pdf: 앞 몇 쪽만 (쪽마다 20초쯤)
+            selected = blank = selected[:OCR_DEFAULT_PAGES]
+        seen, left, problem = _ocr_pages(p, n, blank, hctx)
+    elif not pages and n > PDF_DEFAULT_PAGES:
         note += f", first {PDF_DEFAULT_PAGES} pages (use pages for the rest)"
+    parts = []
+    for i in selected:
+        if i in seen:
+            parts.append(f"[p.{i + 1}, OCR]\n{seen[i] or '(no text found on this page)'}")
+        elif i in left:
+            parts.append(f"[p.{i + 1}]\n(scanned page, not read yet)")
+        elif i in blank:
+            parts.append(f"[p.{i + 1}]\n(no text on this page; it may be a scanned image)")
+        else:
+            parts.append(f"[p.{i + 1}]\n{texts[i]}")
+    if seen:
+        done = _ranges(sorted(seen))
+        note += (f"; scanned pages {done} were read by OCR with the local model (names and numbers may be misread)")
+    if left:
+        note += f"; not read yet: pages {_ranges(left)} (OCR takes about 20 s a page; ask again with those pages)"
+    elif not pages and seen and n > len(selected):
+        note += f"; pages {len(selected) + 1}-{n} not read yet (ask with pages)"
+    if problem:
+        note += f"; OCR stopped: {problem}"
     return "\n\n".join(parts), note
+
+
+def _ranges(pages: list[int]) -> str:
+    """[0, 1, 2, 5] (0부터) -> "1-3, 6"."""
+    out: list[str] = []
+    start = prev = -2
+    for i in sorted(pages) + [-2]:
+        if i == prev + 1 and i >= 0:
+            prev = i
+            continue
+        if start >= 0:
+            out.append(f"{start + 1}" if start == prev else f"{start + 1}-{prev + 1}")
+        start = prev = i
+    return ", ".join(out)
+
+
+def _ocr_pages(p: Path, n: int, wanted: list[int], hctx: HandContext) -> tuple[dict[int, str], list[int], str]:
+    """스캔한 쪽들을 글자 인식으로 (캐시에 있으면 그대로). (읽은 쪽 {쪽: 글}, 시간이 모자라 못 읽은 쪽, 멈춘 까닭)."""
+    st = p.stat()
+    model = hctx.model_name or "model"
+    cache = docs.DocCache(hctx.home / "cache" / DOC_CACHE)
+    started = time.monotonic()
+    seen: dict[int, str] = {}
+    left: list[int] = []
+    problem = ""
+    try:
+        known = cache.ocr(p, st, model)
+        fresh = 0
+        for i in wanted:
+            if i in known:
+                seen[i] = known[i]
+                continue
+            if problem or fresh >= OCR_MAX_PAGES or time.monotonic() - started > OCR_BUDGET_S:
+                left.append(i)
+                continue
+            try:
+                text = ocr.transcribe(hctx.llm, ocr.render_pdf_page(p, i))
+            except LLMError as e:
+                problem = str(e)
+                left.append(i)
+                continue
+            except Exception as e:                     # 그릴 수 없는 쪽: 이 쪽만 건너뛴다
+                seen[i] = f"(could not render this page: {type(e).__name__})"
+                continue
+            cache.put_ocr(p, st, i, model, text)
+            known[i] = seen[i] = text
+            fresh += 1
+        if fresh:
+            _index_ocr(p, st, n, known, hctx)
+    finally:
+        cache.close()
+    return seen, left, problem
+
+
+def _index_ocr(p: Path, st: os.stat_result, n: int, known: dict[int, str], hctx: HandContext) -> None:
+    """글자 인식으로 읽은 쪽을 내용 색인에도 (그 파일이 색인에 있을 때만): 다음부터 내용으로 찾을 수 있게."""
+    idx = content_index.open_index(hctx.home)
+    if idx is None:
+        return
+    try:
+        key = content_index.file_key(p)
+        e = idx.entries([key]).get(key)
+        if e is not None and e.fresh(st):
+            text = content_index.PAGE.join(known.get(i, "") for i in range(n))
+            idx.put(p, st, "ok", n, len(known), e.title, text)
+    except sqlite3.Error:
+        pass
+    finally:
+        idx.close()
+
+
+def _read_image(p: Path, hctx: HandContext) -> tuple[str, str]:
+    """그림 속 글 (글자 인식, M7.3)."""
+    if not ocr.can_see(hctx.llm):
+        raise tool_error("tool.ocr_unavailable")
+    st = p.stat()
+    model = hctx.model_name or "model"
+    cache = docs.DocCache(hctx.home / "cache" / DOC_CACHE)
+    try:
+        known = cache.ocr(p, st, model)
+        if 0 in known:
+            text = known[0]
+        else:
+            try:
+                text = ocr.transcribe(hctx.llm, ocr.image_png(p))
+            except LLMError as e:
+                raise tool_error("tool.ocr_failed", detail=str(e)) from None
+            except Exception as e:                     # 그림을 열 수 없음
+                raise tool_error("tool.image_open", detail=f"{type(e).__name__}: {e}"[:200]) from None
+            cache.put_ocr(p, st, 0, model, text)
+    finally:
+        cache.close()
+    return text or "(no text found in this image)", "image, read by OCR with the local model (names and numbers may be misread)"
+
+
+def _read_hwp(p: Path) -> tuple[str, str]:
+    from glados.hands import hwp
+
+    h = hwp.read(p, READ_MAX_BYTES)
+    if h.status == "locked":
+        raise tool_error("tool.hwp_locked")
+    if h.status != "ok":
+        raise tool_error("tool.hwp_open", detail=h.detail)
+    return h.text, "hwp" + (f", {h.detail}" if h.detail else "")
 
 
 def _read_docx(p: Path) -> str:
@@ -874,9 +1152,13 @@ def read(args: dict[str, Any], hctx: HandContext) -> str:
     max_chars = max(200, min(_int(args.get("max_chars"), READ_DEFAULT), READ_MAX))
 
     if ext == "pdf":
-        text, note = _read_pdf(p, args.get("pages"))
+        text, note = _read_pdf(p, args.get("pages"), hctx)
     elif ext == "docx":
         text, note = _read_docx(p), "docx"
+    elif ext in ("hwp", "hwpx"):
+        text, note = _read_hwp(p)
+    elif ext in IMAGE_EXTS:
+        text, note = _read_image(p, hctx)
     else:
         text, enc = _read_text_file(p)
         note = "" if enc in ("utf-8", "utf-8-sig") else f"encoding {enc}"
@@ -963,7 +1245,7 @@ def fs_tools(hctx: HandContext) -> list[Tool]:
     return [
         Tool(
             "fs.search",
-            "Find files by name; with content=true, also by words inside them (text, pdf, docx). query: English "
+            "Find files by name; with content=true, also by words inside them (text, pdf, docx, hwp). query: English "
             "keywords; names in other languages are matched by their English meaning, shown after \"en:\". "
             "kind: pdf, docx, md, txt, text, code, ... year: year modified or year in the name. roots: folders to "
             "search, e.g. [\"~/Downloads\"], [\"~/Documents\"], [\"~/Desktop\"], whole home [\"~\"] "
@@ -984,10 +1266,11 @@ def fs_tools(hctx: HandContext) -> list[Tool]:
         ),
         Tool(
             "fs.read",
-            "Read a file (text, pdf, docx). Long files continue with the offset shown at the end of the result; "
-            "for a pdf choose pages like pages=\"2-4\"",
+            "Read a file (text, pdf, docx, hwp; scanned pdf pages and images by OCR, slowly). Long files continue "
+            "with the offset shown at the end of the result; for a pdf choose pages like pages=\"2-4\"",
             READ_PARAMS,
             lambda a: read(a, hctx),
+            timeout_s=READ_TIMEOUT_S,
         ),
         Tool(
             "fs.write_new",

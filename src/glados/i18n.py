@@ -191,6 +191,14 @@ TEXT: dict[str, dict[str, str]] = {
     "tool.pdf_open": {"ko": "PDF를 열 수 없습니다 (암호가 걸렸거나 깨진 파일): {detail}",
                       "en": "Cannot open the PDF (encrypted or damaged): {detail}"},
     "tool.docx_open": {"ko": "docx를 열 수 없습니다: {detail}", "en": "Cannot open the docx: {detail}"},
+    "tool.hwp_open": {"ko": "한글 문서를 열 수 없습니다: {detail}", "en": "Cannot open the hwp file: {detail}"},
+    "tool.hwp_locked": {"ko": "암호가 걸린 한글 문서라 읽을 수 없습니다", "en": "The hwp file is locked with a password"},
+    "tool.ocr_unavailable": {"ko": "글자 인식(OCR)을 할 수 없습니다 (그림을 읽는 모델 연결이 없음)",
+                             "en": "OCR is not available (no model connection that can read images)"},
+    "tool.ocr_failed": {"ko": "글자 인식(OCR)이 실패했습니다: {detail}", "en": "OCR failed: {detail}"},
+    "tool.image_open": {"ko": "그림을 열 수 없습니다: {detail}", "en": "Cannot open the image: {detail}"},
+    "llm.no_vision": {"ko": "모델 {model}은 그림을 읽지 못합니다 (글자 인식에는 그림을 읽는 모델이 필요합니다. 예: qwen3.5)",
+                      "en": "Model {model} cannot read images (OCR needs a model that reads images, e.g. qwen3.5)"},
     "tool.no_file": {"ko": "파일이 없습니다: {path}", "en": "No such file: {path}"},
     # 원격 손 (M4)
     "tool.remote_unknown": {"ko": "{server}는 servers.toml에 없는 서버입니다 (있는 서버: {servers})",
@@ -351,7 +359,8 @@ TEXT: dict[str, dict[str, str]] = {
               "  /servers  서버 목록과 연결·GPU 상태 (servers.toml)\n"
               "  /runs     서버 실행 목록 (EXP-NN, 상태, tmux 세션)\n"
               "  /resume   지난 대화 목록, /resume 번호 로 이어 가기 (말로도 됩니다)\n"
-              "  /memory   기억한 것 (MEMORY.md), /memory del 번호 로 지우기\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다 (서버의 실행은 계속 돕니다).\n"
+              "  /memory   기억한 것 (MEMORY.md), /memory del 번호 로 지우기\n"
+              "  /index    내용 색인 상태 (미리 읽어 둔 문서)\n작업 중 Ctrl+C를 누르면 지금 작업만 멈춥니다 (서버의 실행은 계속 돕니다).\n"
               "답은 물은 언어로 합니다 (한국어로 물으면 한국어, 영어로 물으면 영어).",
         "en": "Commands\n  /help     this help\n  /new      new conversation (the earlier one is saved; /resume continues it)\n"
               "  /context  what is in memory now\n  /log      last 10 policy decisions\n"
@@ -361,9 +370,40 @@ TEXT: dict[str, dict[str, str]] = {
               "  /servers  servers with connection and GPU state (servers.toml)\n"
               "  /runs     your server runs (EXP-NN, state, tmux session)\n"
               "  /resume   earlier conversations; /resume <number> continues one (or just ask)\n"
-              "  /memory   what I remember (MEMORY.md); /memory del <number> deletes one\nCtrl+C during a task stops only that task (server runs keep going).\n"
+              "  /memory   what I remember (MEMORY.md); /memory del <number> deletes one\n"
+              "  /index    content index status (documents read ahead)\nCtrl+C during a task stops only that task (server runs keep going).\n"
               "Answers follow the language you ask in (Korean or English).",
     },
+    # 내용 색인 (M7.1)
+    "index.off": {"ko": "내용 색인이 꺼져 있습니다 (glados.toml [index] enabled = false). 내용 찾기는 그때그때 파일을 읽습니다.",
+                  "en": "The content index is off (glados.toml [index] enabled = false). Content search reads files as it goes."},
+    "index.no_fts": {"ko": "이 Python의 SQLite에는 FTS5가 없어 내용 색인을 쓸 수 없습니다. 내용 찾기는 그때그때 파일을 읽습니다.",
+                     "en": "This Python's SQLite has no FTS5, so there is no content index. Content search reads files as it goes."},
+    "index.none": {"ko": "내용 색인이 아직 없습니다. GLaDOS를 켜 두면 뒤에서 만듭니다 (폴더: folders.toml search_default).",
+                   "en": "There is no content index yet. GLaDOS builds it in the background while it is open (folders: folders.toml search_default)."},
+    "index.head": {"ko": "내용 색인: 파일 {files}개 (글 {ok} · 스캔 PDF {scanned} · 암호 {locked} · 못 읽음 {failed})",
+                   "en": "Content index: {files} files ({ok} with text, {scanned} scanned PDFs, {locked} locked, {failed} unreadable)"},
+    "index.walking": {"ko": "지금: 폴더를 훑는 중", "en": "Now: listing the folders"},
+    "index.reading": {"ko": "지금: 읽는 중 {done}/{total} (최근 파일부터)", "en": "Now: reading {done}/{total} (newest first)"},
+    "index.idle": {"ko": "다 읽었습니다. 마지막으로 훑은 때: {when} ({seconds}초). 10분마다 바뀐 파일을 다시 읽습니다",
+                   "en": "Up to date. Last pass: {when} ({seconds}s). Changed files are read again every 10 minutes"},
+    "index.stopped": {"ko": "지금은 색인 프로세스가 돌지 않습니다 (GLaDOS를 켜 두면 다시 돕니다)",
+                      "en": "The indexing process is not running now (it runs while GLaDOS is open)"},
+    "index.folders": {"ko": "폴더: {folders}", "en": "Folders: {folders}"},
+    "index.file": {"ko": "색인 파일: {path} ({size}). 지워도 됩니다 (다시 만듭니다)",
+                   "en": "Index file: {path} ({size}). Safe to delete (it is rebuilt)"},
+    "index.partial": {"ko": "긴 PDF {count}개는 앞부분만 색인했습니다 (파일마다 40만 자·30초까지)",
+                      "en": "{count} long PDFs are indexed only in part (up to 400,000 characters or 30 s per file)"},
+    "index.error": {"ko": "마지막 오류: {detail}", "en": "Last error: {detail}"},
+    "index.meaning_ready": {"ko": "뜻으로 찾기: 파일 {ready}/{total}개 준비 ({model})",
+                            "en": "Search by meaning: {ready}/{total} files ready ({model})"},
+    "index.meaning_waiting": {"ko": "  (작업 중에는 쉽니다. 같은 GPU를 쓰므로)", "en": "  (paused while a task runs; it shares the GPU)"},
+    "index.meaning_missing": {"ko": "뜻으로 찾기: 모델 {model}이 없습니다. 터미널에서 ollama pull {model} 한 뒤 GLaDOS를 다시 켜세요",
+                              "en": "Search by meaning: model {model} is not installed. Run ollama pull {model}, then restart GLaDOS"},
+    "index.meaning_off": {"ko": "뜻으로 찾기: 꺼짐 (glados.toml [index] embed_model이 비어 있음)",
+                          "en": "Search by meaning: off (glados.toml [index] embed_model is empty)"},
+    "config.index_enabled": {"ko": "glados.toml [index] enabled는 true 또는 false입니다 (받은 값: {value})",
+                             "en": "glados.toml [index] enabled must be true or false (got {value})"},
     "command.later": {"ko": "{cmd}는 {stage}에서 만듭니다.", "en": "{cmd} arrives in {stage}."},
     "command.unknown": {"ko": "모르는 명령입니다: {cmd}. /help를 보세요.", "en": "Unknown command: {cmd}. See /help."},
     # 지난 대화 (M6)

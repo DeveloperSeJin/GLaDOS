@@ -313,10 +313,13 @@ def test_read_rejects_binary_and_unsupported(world):
     (home / "Documents" / "그림.bin").write_bytes(b"\x00\x01\x02" * 100)
     with pytest.raises(ToolError, match="binary"):
         fs.read({"path": "~/Documents/그림.bin"}, hctx)
-    (home / "Documents" / "보고서.hwp").write_bytes(b"x")
-    with pytest.raises(ToolError, match=r"Cannot read \.hwp files yet") as e:
+    (home / "Documents" / "발표.pptx").write_bytes(b"x")
+    with pytest.raises(ToolError, match=r"Cannot read \.pptx files yet") as e:
+        fs.read({"path": "~/Documents/발표.pptx"}, hctx)
+    assert e.value.key == "tool.unsupported" and "pptx" in str(e.value)
+    (home / "Documents" / "보고서.hwp").write_bytes(b"x")                       # hwp는 읽지만 (M7.3) 깨진 파일은 오류
+    with pytest.raises(ToolError, match="Cannot open the hwp file: not an HWP 5.0 file") as e:
         fs.read({"path": "~/Documents/보고서.hwp"}, hctx)
-    assert e.value.key == "tool.unsupported" and "hwp" in str(e.value)
     with pytest.raises(ToolError, match="No such file"):
         fs.read({"path": "~/Documents/없는파일.md"}, hctx)
 

@@ -87,6 +87,7 @@ class HandContext:
     session_id: str = ""
     resume_to: str = ""
     notes: Any = None                            # memory.notes.Notes (MEMORY.md). 없으면 memory.note 없음
+    embedder: Any = None                         # core.llm.Embedder: 뜻으로 찾기의 질문 벡터 (M7.2). 없으면 낱말로만
 
 
 class ToolRegistry:

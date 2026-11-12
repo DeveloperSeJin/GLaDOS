@@ -123,6 +123,14 @@ class WebConfig:
 
 
 @dataclass
+class IndexConfig:
+    """내용 색인 (M7.1): folders.toml search_default의 폴더 문서를 미리 읽어 둔다 (이 컴퓨터 안에서만)."""
+
+    enabled: bool = True
+    embed_model: str = "qwen3-embedding:0.6b"     # 뜻으로 찾기 (M7.2, Ollama 임베딩 모델). 비우면 낱말 색인만
+
+
+@dataclass
 class Server:
     alias: str
     gpus: int = 0
@@ -149,6 +157,7 @@ class Config:
     notify: bool = True              # 서버 실행 알림을 OS 알림(Windows 알림 센터 등)으로도 (M5)
     web: WebConfig = field(default_factory=WebConfig)
     private_names: list[str] = field(default_factory=list)   # [privacy] names: 밖으로 보내면 묻는 이름
+    index: IndexConfig = field(default_factory=IndexConfig)  # [index] 내용 색인 (M7.1)
 
     def private_words(self) -> tuple[str, ...]:
         """웹으로 나가는 글에서 찾을 이름: [privacy] names + [user] name (공유 서버 사용자 이름)."""
@@ -231,6 +240,12 @@ def load_config(home: Path) -> Config:
         searxng_url=str(web_sec.get("searxng_url", WebConfig.searxng_url)).strip().rstrip("/"),
         results=results,
     )
+    index_sec = main.get("index", {})                 # 예전 설정 파일에는 없다 → 켜짐
+    enabled = index_sec.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("config.index_enabled", value=enabled)
+    index = IndexConfig(enabled=enabled,
+                        embed_model=str(index_sec.get("embed_model", IndexConfig.embed_model) or "").strip())
     names = main.get("privacy", {}).get("names", [])
     private_names = [str(n) for n in names] if isinstance(names, list) else []
 
@@ -269,6 +284,7 @@ def load_config(home: Path) -> Config:
         notify=notify,
         web=web,
         private_names=private_names,
+        index=index,
     )
 
 

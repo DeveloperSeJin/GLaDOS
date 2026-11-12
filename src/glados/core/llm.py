@@ -6,6 +6,7 @@
 - 생각 모드(think)는 설정값. 모델이 지원하지 않는다고 하면 빼고 다시 보낸다
 - 멈춤 (TUI): stop_event가 있으면 스트리밍으로 받으면서 조각마다 확인하고, 켜지면 연결을 끊고
   Cancelled를 낸다 (Ollama는 연결이 끊기면 생성을 멈춘다). 줄 화면은 Ctrl+C(KeyboardInterrupt)로 멈춘다
+- 임베딩 (M7.2): Embedder가 /api/embed로 글을 벡터로 바꾼다 (뜻으로 찾기). 모델마다 질문·문서 앞에 붙이는 말이 다르다
 - 계량 (TUI, M2.7): meter가 있으면 부를 때마다 건넨 토큰(↑, Ollama가 센 prompt_eval_count), 받은 토큰(↓, 받는 동안은
   조각 수, 끝나면 eval_count)과 지금 받고 있는 글을 적는다. 화면이 따로 읽는다 (모델 호출을 기다리게 하지 않음)
 """
@@ -268,6 +269,110 @@ class OllamaClient:
             return self._call(messages, schema, temperature)
         body = _short(Exception(r.text))
         raise LLMError(f"Ollama error {r.status_code}: {body}", "llm.http", status=r.status_code, body=body)
+
+    def see(self, image: bytes, prompt: str, max_tokens: int = 2048) -> str:
+        """그림 하나를 보여 주고 답을 받는다 (글자 인식, M7.3). 형식은 강제하지 않는다 (옮겨 적은 글 그대로)."""
+        import base64
+
+        stop = self.stop_event
+        if stop is not None and stop.is_set():
+            raise Cancelled()
+        body: dict[str, Any] = {
+            "model": self.cfg.name, "stream": False, "keep_alive": self.cfg.keep_alive,
+            "messages": [{"role": "user", "content": prompt, "images": [base64.b64encode(image).decode("ascii")]}],
+            "options": {"num_ctx": self.cfg.num_ctx, "temperature": 0, "num_predict": max_tokens},
+        }
+        if self._think_supported:
+            body["think"] = False
+        meter = self.meter
+        if meter is not None:
+            meter.begin()
+        try:
+            r = self._http.post("/api/chat", json=body)
+            if r.status_code == 400 and "think" in r.text.lower() and "think" in body:
+                self._think_supported = False
+                body.pop("think")
+                r = self._http.post("/api/chat", json=body)
+        except httpx.TransportError as e:
+            raise OllamaUnavailable(f"Cannot reach Ollama ({self.cfg.host}): {_short(e)}",
+                                    "ollama.unreachable", host=self.cfg.host) from e
+        finally:
+            if meter is not None:
+                meter.end()
+        if r.status_code == 404:
+            raise ModelMissing(f"Model {self.cfg.name} is not installed. Run 'ollama pull {self.cfg.name}'",
+                               "model.missing", model=self.cfg.name)
+        if r.status_code != 200:
+            body_text = _short(Exception(r.text))
+            if any(w in r.text.lower() for w in ("image", "vision", "multimodal")):
+                raise LLMError(f"Model {self.cfg.name} cannot read images: {body_text}", "llm.no_vision",
+                               model=self.cfg.name)
+            raise LLMError(f"Ollama error {r.status_code}: {body_text}", "llm.http", status=r.status_code, body=body_text)
+        try:
+            data = r.json()
+            content = str(data["message"]["content"])
+        except (KeyError, TypeError, json.JSONDecodeError) as e:
+            raise LLMError(f"Cannot read the Ollama response: {_short(e)}", "llm.bad_response", detail=_short(e)) from e
+        if meter is not None:
+            meter.end(data.get("prompt_eval_count"), data.get("eval_count"))
+        return content
+
+    def close(self) -> None:
+        self._http.close()
+
+
+# ---------------------------------------------------------------------- 임베딩 (M7.2, 뜻으로 찾기)
+# 모델이 배운 대로: 질문 앞에 붙이는 말, 문서 앞에 붙이는 말 ({text}, {title}). 모델 이름의 ':' 앞으로 고른다
+EMBED_FORMATS: dict[str, tuple[str, str]] = {
+    "qwen3-embedding": ("Instruct: Given a search query, retrieve documents that are relevant to it\nQuery:{text}",
+                        "{text}"),
+    "embeddinggemma": ("task: search result | query: {text}", "title: {title} | text: {text}"),
+}
+EMBED_DIMS = 256            # 벡터 길이 (Matryoshka 모델은 앞부분만 써도 된다. 무시하는 모델은 원래 길이로)
+
+
+class Embedder:
+    """글 -> 벡터 (Ollama /api/embed). 질문과 문서는 모델이 배운 형식으로 따로 감싼다."""
+
+    def __init__(self, host: str, model: str, timeout_s: float = 120.0,
+                 transport: httpx.BaseTransport | None = None, keep_alive: str = "10m"):
+        self.host = host.rstrip("/")
+        self.model = model
+        self.keep_alive = keep_alive
+        self._http = httpx.Client(base_url=self.host, timeout=httpx.Timeout(timeout_s, connect=5.0), transport=transport)
+        family = model.split(":", 1)[0].lower()
+        self.query_format, self.doc_format = EMBED_FORMATS.get(family, ("{text}", "{text}"))
+
+    def queries(self, texts: list[str]) -> list[list[float]]:
+        return self._embed([self.query_format.format(text=t) for t in texts])
+
+    def documents(self, texts: list[str], title: str = "") -> list[list[float]]:
+        return self._embed([self.doc_format.format(text=t, title=title or "none") for t in texts])
+
+    def _embed(self, inputs: list[str]) -> list[list[float]]:
+        body = {"model": self.model, "input": clean_any(inputs), "truncate": True, "dimensions": EMBED_DIMS,
+                "keep_alive": self.keep_alive}
+        try:
+            r = self._http.post("/api/embed", json=body)
+        except httpx.TransportError as e:
+            raise OllamaUnavailable(f"Cannot reach Ollama ({self.host}): {_short(e)}",
+                                    "ollama.unreachable", host=self.host) from e
+        if r.status_code == 404 or (r.status_code >= 400 and "not found" in r.text.lower()):
+            raise ModelMissing(f"Model {self.model} is not installed. Run 'ollama pull {self.model}'",
+                               "model.missing", model=self.model)
+        if r.status_code >= 400 and "dimensions" in r.text.lower() and "dimensions" in body:
+            body.pop("dimensions")                       # 길이를 고를 수 없는 모델: 원래 길이로
+            r = self._http.post("/api/embed", json=body)
+        if r.status_code != 200:
+            detail = _short(Exception(r.text))
+            raise LLMError(f"Ollama error {r.status_code}: {detail}", "llm.http", status=r.status_code, body=detail)
+        try:
+            vectors = r.json()["embeddings"]
+            if len(vectors) != len(inputs):
+                raise ValueError("wrong number of embeddings")
+            return [[float(x) for x in v] for v in vectors]
+        except (KeyError, TypeError, ValueError) as e:
+            raise LLMError(f"Cannot read the Ollama response: {_short(e)}", "llm.bad_response", detail=_short(e)) from e
 
     def close(self) -> None:
         self._http.close()
