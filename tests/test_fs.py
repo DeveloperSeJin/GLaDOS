@@ -407,7 +407,7 @@ def test_scenario_find_read_summarize(world):
     assert "Penalty clause" in observations[1]
     assert "Created new file" in observations[2]
     assert (home / "Documents" / "위약금_정리.md").exists() and asked == []   # 일반 위치는 묻지 않음
-    schema = llm.calls[0][1]
+    schema = llm.calls[1][1]                       # [0]은 계획 호출 (M7.7)
     search_args = schema["properties"]["action"]["anyOf"][0]["properties"]["args"]
     assert search_args["required"] == ["query"]                                # 도구별 인자 스키마
 

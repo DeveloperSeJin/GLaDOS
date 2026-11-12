@@ -106,6 +106,8 @@ class LoopLimits:
     tool_error_limit: int = 2
     local_timeout_s: int = 60
     remote_timeout_s: int = 300
+    plan_first: bool = True          # 행동하기 전에 계획을 먼저 세운다 (M7.7)
+    checkin_steps: int = 6           # 도구를 이만큼 쓰면 돌아와 지금까지를 말하고 계속할지 묻는다 (M8). 0이면 안 함
 
 
 @dataclass
@@ -128,6 +130,8 @@ class IndexConfig:
 
     enabled: bool = True
     embed_model: str = "qwen3-embedding:0.6b"     # 뜻으로 찾기 (M7.2, Ollama 임베딩 모델). 비우면 낱말 색인만
+    ocr: bool = True                              # 놀 때 사진·스캔 pdf를 모델로 보기 (M7.5)
+    cloud: bool = True                            # 클라우드에만 있는 파일(구글 드라이브 등)도 내려받아 읽기 (M7.5)
 
 
 @dataclass
@@ -223,7 +227,8 @@ def load_config(home: Path) -> Config:
         raise ConfigError("config.notify", value=notify)
 
     loop_sec = main.get("loop", {})
-    limits = LoopLimits(**{k: int(v) for k, v in loop_sec.items() if k in LoopLimits.__dataclass_fields__})
+    limits = LoopLimits(**{k: (bool(v) if k == "plan_first" else int(v))
+                           for k, v in loop_sec.items() if k in LoopLimits.__dataclass_fields__})
 
     web_sec = main.get("web", {})                     # 예전 설정 파일에는 없다 → 검색 없음
     search = str(web_sec.get("search", "")).strip().lower()
@@ -244,8 +249,14 @@ def load_config(home: Path) -> Config:
     enabled = index_sec.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("config.index_enabled", value=enabled)
+    flags = {}
+    for name in ("ocr", "cloud"):                     # M7.5
+        value = index_sec.get(name, getattr(IndexConfig, name))
+        if not isinstance(value, bool):
+            raise ConfigError("config.index_flag", name=name, value=value)
+        flags[name] = value
     index = IndexConfig(enabled=enabled,
-                        embed_model=str(index_sec.get("embed_model", IndexConfig.embed_model) or "").strip())
+                        embed_model=str(index_sec.get("embed_model", IndexConfig.embed_model) or "").strip(), **flags)
     names = main.get("privacy", {}).get("names", [])
     private_names = [str(n) for n in names] if isinstance(names, list) else []
 

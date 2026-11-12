@@ -4,8 +4,10 @@
 # - GLaDOS 안전장치(이 폴더 전체, 정책 파일, GLaDOS 소스)는 GLaDOS가 고칠 수 없음
 # 위 규칙은 코드에 들어 있다. 여기서는 기본 검색 범위와 추가 보호 위치만 정한다.
 
-# "찾아줘"라고만 하면 여기서 먼저 찾는다
-search_default = ["~/Downloads", "~/Documents", "~/Desktop"]
+# "찾아줘"라고만 하면 여기서 찾는다. 내용 색인도 이 범위를 훑는다.
+# "*" = 컴퓨터의 모든 드라이브 (Windows: 고정·이동식 드라이브와 구글 드라이브, 리눅스·맥: 홈과 붙인 볼륨). M7.5
+# 좁히려면 예: ["~/Downloads", "~/Documents", "~/Desktop"]
+search_default = ["*"]
 
 # 보호 위치를 더 넣고 싶으면 여기에 (예: "~/연구/비공개")
 extra_protected = []

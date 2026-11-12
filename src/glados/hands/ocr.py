@@ -66,3 +66,64 @@ def transcribe(llm: Any, png: bytes) -> str:
     text = str(llm.see(png, PROMPT) or "").strip()
     text = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", text).strip()     # 코드 칸으로 감싸 보내는 모델
     return "" if text.upper().strip(" .") == "NO_TEXT" else text
+
+
+# ---------------------------------------------------------------------- 그림이 무엇인지 + 글 (M7.5)
+INSPECT_SIDE = 896            # 살펴보기(예·아니요)에는 작게 (빠르게)
+BACKGROUND_SIDE = 1280        # 뒤에서 미리 볼 때 (수천 장: 1600보다 빠르고, 신분증 글자는 읽힌다)
+DESCRIBE = ("Look at this image. First, one short English sentence saying what it is (for example: a photo of a "
+            "Korean driver's license card; a screenshot of a spreadsheet; a photo of a whiteboard; a photo of a cat). "
+            "Then transcribe all text in the image exactly as written, in its own language. Reply in this form:\n"
+            "DESCRIPTION: <sentence>\nTEXT:\n<the text, or NO_TEXT>")
+ASK = ("Question about this image: {question}\nReply in one line: yes, no, or unsure, then \" - \" and the reason "
+       "in under 15 English words (what you see that decided it).")
+DESCRIBED = "#described"      # 캐시에서 옮겨 적기(모델 이름)와 나눠 두는 표시
+
+
+def describe(llm: Any, png: bytes) -> str:
+    """그림 -> "Image: <무엇인지>\\n<보이는 글>" (색인·읽기에 그대로 쓴다)."""
+    raw = str(llm.see(png, DESCRIBE) or "").strip()
+    raw = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", raw).strip()
+    m = re.search(r"DESCRIPTION:\s*(.*?)\s*(?:\n\s*TEXT:\s*\n?(.*))?$", raw, re.S | re.I)
+    if m:
+        what, text = m.group(1).strip(), (m.group(2) or "").strip()
+    else:                                             # 형식을 안 지킨 답: 통째로 글로
+        what, text = "", raw
+    if text.upper().strip(" .") == "NO_TEXT":
+        text = ""
+    head = f"Image: {what}" if what else "Image"
+    return head + (f"\n{text}" if text else "")
+
+
+def describe_cached(llm: Any, path: Path, st: Any, model: str, cache: Any = None, max_side: int = MAX_SIDE) -> str:
+    """그림 파일 하나 (캐시: doctext.sqlite의 ocr 표, 쪽 0, 모델 이름 + #described)."""
+    key = model + DESCRIBED
+    if cache is not None:
+        known = cache.ocr(path, st, key)
+        if 0 in known:
+            return known[0]
+    text = describe(llm, image_png(path, max_side))
+    if cache is not None:
+        cache.put_ocr(path, st, 0, key, text)
+    return text
+
+
+def page_cached(llm: Any, path: Path, st: Any, index: int, model: str, cache: Any = None) -> str:
+    """스캔 pdf의 한 쪽 (fs.read와 같은 캐시)."""
+    if cache is not None:
+        known = cache.ocr(path, st, model)
+        if index in known:
+            return known[index]
+    text = transcribe(llm, render_pdf_page(path, index))
+    if cache is not None:
+        cache.put_ocr(path, st, index, model, text)
+    return text
+
+
+def ask(llm: Any, png: bytes, question: str) -> tuple[str, str]:
+    """그림을 보고 예·아니요 질문에 답한다 (fs.inspect). (yes|no|unsure, 까닭)."""
+    raw = " ".join(str(llm.see(png, ASK.format(question=question), max_tokens=60) or "").split())
+    m = re.match(r"\W*(yes|no|unsure)\b\W*(.*)", raw, re.I)
+    if not m:
+        return "unsure", raw[:160] or "no answer"
+    return m.group(1).lower(), m.group(2).strip()[:160]

@@ -252,9 +252,9 @@ def test_system_prompt_has_shell_folder_and_reply_language_last(app):
     a.ask_task("안녕, 잘 지내?")
     english_system = a.llm.calls[0][0][0]["content"].rstrip()
     korean_system = a.llm.calls[1][0][0]["content"].rstrip()
-    assert english_system.endswith("Language: the Researcher wrote in English. Write the answer in English.")   # 맨 끝
+    assert english_system.endswith("Language: the Researcher wrote in English. Write everything in English.")   # 맨 끝
     assert korean_system.endswith("it is translated into Korean for them automatically.")
-    assert "Still think and write the answer in English" in korean_system
+    assert "Still write everything in English (say, answer, thought, plan)" in korean_system   # M8.3
 
 
 def test_repl_routes_bang_lines(app, monkeypatch):

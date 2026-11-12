@@ -120,7 +120,7 @@ class Seer(FakeLLM):
     def see(self, image: bytes, prompt: str, max_tokens: int = 2048) -> str:
         if self.fail:
             raise self.fail
-        assert image.startswith(b"\x89PNG") and "Transcribe" in prompt
+        assert image.startswith(b"\x89PNG") and "transcribe" in prompt.lower()
         self.images.append(image)
         return self.texts.pop(0) if self.texts else "NO_TEXT"
 

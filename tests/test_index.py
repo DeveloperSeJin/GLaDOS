@@ -98,19 +98,19 @@ def test_pass_reads_new_and_changed_files_and_forgets_gone_ones(world):
         names = sorted(os.path.basename(e) for e in idx.all_ids())
         assert names == sorted(["2025_외주개발_계약서.pdf", "2024_임대_계약서.pdf", "회의록.md", "예전메모.txt",
                                 "report.docx"])                               # 숨은 폴더·node_modules·안전장치는 없다
-        assert first == {"seen": 5, "read": 5}
+        assert first == {"seen": 5, "read": 5, "listed": 5}
         pdf = home / "Downloads" / "계약" / "2025_외주개발_계약서.pdf"
         e = idx.entries([ci.file_key(pdf)])[ci.file_key(pdf)]
         assert (e.status, e.pages, e.read_pages) == ("ok", 2, 2) and e.fresh(pdf.stat())
         assert idx.snippet(e.id, ["penalty"])[1] == 2                            # 2쪽
         assert idx.match([["protein"]]) and idx.match([["메모입니다"]])            # docx, cp949 글 파일
 
-        assert ci.run_pass(idx, roots, hctx.places) == {"seen": 5, "read": 0}    # 그대로면 다시 읽지 않는다
+        assert ci.run_pass(idx, roots, hctx.places) == {"seen": 5, "read": 0, "listed": 0}   # 그대로면 다시 읽지 않는다
         memo = home / "Documents" / "회의록.md"
         memo.write_text("# 회의록\n- 새 안건: 데이터 증강\n", encoding="utf-8")
         os.utime(memo, (time.time() + 5, time.time() + 5))
         (home / "Downloads" / "2024_임대_계약서.pdf").unlink()
-        assert ci.run_pass(idx, roots, hctx.places) == {"seen": 4, "read": 1}
+        assert ci.run_pass(idx, roots, hctx.places) == {"seen": 4, "read": 1, "listed": 1}
         assert len(idx.all_ids()) == 4 and idx.match([["데이터 증강"]]) and not idx.match([["실험 3"]])
         assert idx.stats()["state"] == "idle"
     finally:
@@ -123,7 +123,7 @@ def test_pass_stops_when_asked(world):
     stop = ci.threading.Event()
     stop.set()
     try:
-        assert ci.run_pass(idx, roots, hctx.places, stop) == {"seen": 5, "read": 0}
+        assert ci.run_pass(idx, roots, hctx.places, stop) == {"seen": 5, "read": 0, "listed": 5}
         assert idx.stats()["state"] == "reading"                                # 끝까지 훑지 않았으니 지우지도 않는다
     finally:
         idx.close()
@@ -243,7 +243,7 @@ def test_index_command_shows_the_state(tmp_path):
             idx.close()
         app.command("/index")
         text = out.getvalue()
-        assert "파일 2개 (글 1 · 스캔 PDF 1 · 암호 0 · 못 읽음 0)" in text
+        assert "파일 2개 (글 1 · 스캔 PDF 1 · 암호 0 · 못 읽음 0 · 이름만 0)" in text
         assert "지금은 색인 프로세스가 돌지 않습니다" in text and "마지막으로 훑은 때" in text
         assert f"폴더: {docs_dir}" in text and "index.sqlite" in text
     finally:
@@ -285,6 +285,7 @@ def test_app_starts_and_stops_the_indexer_and_marks_tasks(tmp_path, monkeypatch)
         app.places = app.hctx.places = ci_places = Places(os=osinfo.current_os(), home=str(tmp_path),
                                                           glados_home=str(app.cfg.home))
         app.hctx.user_dirs = {}
+        app.cfg.search_default = ["~/Downloads"]
         app.start_background()
         assert app.indexer is not None and started[0][:3] == [sys.executable, "-m", "glados.hands.index"]
         job = json.loads((app.cfg.home / "cache" / ci.JOB_FILE).read_text(encoding="utf-8"))

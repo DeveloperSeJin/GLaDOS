@@ -12,13 +12,21 @@ Ollama는 필수 칸을 먼저, 나머지는 뒤에 붙이는 문법으로 출�
 계획을 쓴 뒤 done:false로 action을 빼먹는 일이 실제로 났다 (2026-11-11 연구원님 PC, 세 번 연속 형식 오류).
 그래도 계획만 쓰고 행동을 안 하면 루프가 한 번 "이제 첫 걸음을 떼라"고 되돌린다.
 
+계획 먼저 (M7.7, 연구원님 "움직이기 전에 어떻게 찾아야 하는지 계획을 먼저 세우는 방식으로"): 도구가 있으면 행동하기 전에
+따로 한 번 계획만 받는다 (Plan). next로 셋 중 하나: ask(무엇을 원하는지 알 수 없음 -> 짐작하지 않고 되묻기,
+M7.8), answer(인사, 아는 것 -> 바로 답), act(목표, 계획 단계, 확인 방법). 목표는 연구원님이 말한 범위 그대로 (M7.8). 그다음 걸음들은 계획을 따른다 (plan은 바꿀 때만). 계획 답이 형식을 못 맞추면 예전처럼 첫 걸음에 계획을 받는다.
+
+대화 차례 (M8, 연구원님 "대화 방식을 크게 바꿔야"): 그 계획 호출이 곧 GLaDOS의 첫 말이다. say = 연구원님의 언어로
+바로 하는 말 (answer면 답, ask면 되묻는 질문, act면 "어디서 무엇부터 하겠다"). 목표·계획·확인은 영어 (도구 쪽).
+wit은 영어 한 문장, 맞을 때만 (연구원님 결정). act는 계획이 없어도 받는다 (형식 실패로 대화 차례를 잃지 않게).
+
 Ollama `format`에 넣을 JSON 스키마는 지금 쓸 수 있는 도구 이름으로 좁힌다.
 도구가 하나도 없으면 바로 답하도록 done은 true만 허용한다.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -54,10 +62,38 @@ class Step(BaseModel):
 
 MAX_PLAN = 6                  # 계획 단계 수 한도 (작은 모델이 목록을 끝없이 늘리지 않게)
 
+
+class Plan(BaseModel):
+    """대화 차례: 행동하기 전의 첫 말과 계획 (M7.7, M8)."""
+    goal: str = ""
+    next: Literal["ask", "answer", "act"]
+    plan: list[str] = Field(default_factory=list)
+    check: str = ""
+    say: str = ""
+    wit: str = ""
+    sources: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check(self) -> "Plan":
+        if self.next != "act" and not self.say.strip():
+            raise ValueError(f'next is "{self.next}", so say is required')
+        return self
+
+    def answer(self) -> Answer:
+        return Answer(fact=self.say.strip(), wit=self.wit.strip())
+
+
+def parse_plan(data: dict[str, Any]) -> "Plan | Step":
+    """계획 답. 걸음 모양이면(계획을 건너뛴 답, 시험의 가짜 모델) 그 걸음 그대로."""
+    if "next" in data or "done" not in data:
+        return Plan.model_validate(data)
+    return Step.model_validate(data)
+
+# 위트는 선택 칸 (M8.2): 필수면 작은 모델이 늘 채운다. Ollama는 선택 칸을 필수 칸 뒤에 두고 빼도 되게 한다
 ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"fact": {"type": "string"}, "wit": {"type": "string"}},
-    "required": ["fact", "wit"],
+    "required": ["fact"],
 }
 
 
@@ -101,4 +137,21 @@ def step_schema(tools: list[str] | list[tuple[str, dict[str, Any]]], plan: bool 
             "sources": {"type": "array", "items": {"type": "string"}},
         },
         "required": (["plan"] if plan else []) + ["thought", "action", "done"],
+    }
+
+
+def plan_schema() -> dict[str, Any]:
+    """대화 차례의 형식 (필수 칸 순서대로 쓰게 된다: 목표 -> 다음 -> 계획 -> 확인 -> 할 말 -> 위트 -> 출처)."""
+    return {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "string"},
+            "next": {"type": "string", "enum": ["ask", "answer", "act"]},
+            "plan": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_PLAN},
+            "check": {"type": "string"},
+            "say": {"type": "string"},
+            "sources": {"type": "array", "items": {"type": "string"}},
+            "wit": {"type": "string"},
+        },
+        "required": ["goal", "next", "plan", "check", "say", "sources"],      # wit은 선택 (M8.2)
     }

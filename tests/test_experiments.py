@@ -408,7 +408,8 @@ def test_experiment_session_continues_after_glados_restarts(srv, tmp_path):
     assert lines[-1] == "22,0.045,0.72,0.78"                                          # 남은 출력만 이어서 읽음
     md = (folder / "summary.md").read_text()
     assert "## 지표 (전체 22줄, metrics.csv와 같음)" in md and "| 1 | 1 | 0.51 | 0.99 |" in md   # 모든 epoch
-    assert notices[-1].kind == "done" and "GLaDOS가 꺼져 있는 동안 끝났습니다" in "\n".join(notices[-1].lines())
+    done = [n for n in notices if n.kind == "done"]                                    # 오후에 돌리면 하루 GPU 시간 알림이
+    assert done and "GLaDOS가 꺼져 있는 동안 끝났습니다" in "\n".join(done[-1].lines())  # 뒤에 붙는다 (가짜 시작 시각 탓)
 
 
 def test_new_kinds_of_lines_make_it_look_again(srv, tmp_path):

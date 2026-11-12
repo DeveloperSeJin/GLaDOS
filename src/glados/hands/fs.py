@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 import shutil
 import sqlite3
@@ -57,7 +58,9 @@ DOC_EXTS = {"pdf", "docx", "hwp", "hwpx"}                         # hwp·hwpx는
 NOT_YET = {"doc", "xlsx", "xls", "pptx", "ppt"}                    # 아직 못 읽는 종류 (v1)
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"}   # fs.read가 글자 인식으로 (M7.3)
 CANNOT_WRITE = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "hwp", "hwpx"}
-SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache", ".tox", ".mypy_cache", ".pytest_cache", "site-packages"}
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache", ".tox", ".mypy_cache", ".pytest_cache", "site-packages",
+             "anaconda3", "miniconda3", "miniforge3", "mambaforge", "Windows.old"}   # 아래 5개: 모든 드라이브 (M7.5)
+ALL_DRIVES = "*"              # folders.toml search_default·roots의 "모든 드라이브" (M7.5)
 
 # 폴더를 이름으로 적어도 실제 위치로 ("Downloads", "~/Downloads/contracts", "my documents folder").
 # 영어 낱말만 둔다. 다른 언어로 적은 폴더 말("다운로드")은 Glossary가 영어로 옮긴 뒤 여기서 찾는다
@@ -250,6 +253,8 @@ def _translated_folder_word(segment: str, hctx: HandContext) -> str | None:
 def _root_candidates(raw: Any, hctx: HandContext) -> list[Path]:
     """찾을 폴더 하나를 실제 위치 후보들로. 폴더 이름이면 그 OS의 실제 위치(여러 개일 수 있음)."""
     text = nfc(str(raw or "")).strip().strip('"').strip("'")
+    if text == ALL_DRIVES:                               # 모든 드라이브 (M7.5)
+        return [Path(r) for r in content_index.all_roots(hctx.places.os, hctx.places.home)]
     s = text.replace("\\", "/")
     if s in ("~", "~/"):
         return [_path("~", hctx)]
@@ -295,7 +300,7 @@ def _list_with_rg(rg: str, root: Path, exts: tuple[str, ...]) -> list[Path]:
     for e in exts:
         cmd += ["--iglob", f"*.{e}"]
     for d in sorted(SKIP_DIRS):                        # 파이썬으로 훑을 때·색인과 같게 (M7.1: rg는 node_modules를 봤다)
-        cmd += ["--glob", f"!{d}"]
+        cmd += ["--iglob", f"!{d}"]
     cmd.append(str(root))
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=LIST_TIMEOUT_S, check=False).stdout
@@ -330,6 +335,18 @@ class _Candidate:
     english: list[str]                # 이름 속 영어 낱말
     foreign: list[str]                # 이름 속 영어가 아닌 낱말 (영어로 옮겨 비교)
     stat: os.stat_result | None = None
+    entry: Any = None                 # 파일 목록(색인)에서 왔으면 그 항목 (M7.5)
+
+
+@dataclass
+class _CatStat:
+    """색인의 파일 목록에 적힌 크기·수정 시각 (디스크를 다시 보지 않는다, M7.5)."""
+    st_size: int
+    st_mtime_ns: int
+
+    @property
+    def st_mtime(self) -> float:
+        return self.st_mtime_ns / 1e9
 
 
 def _term_match(term: str, cand: _Candidate, name_stems: set[str], gloss: dict[str, tuple[str, ...]]) -> int | None:
@@ -372,6 +389,7 @@ class _Scope:
     visible: Callable[[Path, Path], os.stat_result | None]
     gloss: dict[str, tuple[str, ...]]
     untranslated: int
+    catalog: float = 0.0              # 파일 목록을 색인에서 가져왔으면 그 목록을 다 적은 때 (M7.5)
 
     @property
     def label(self) -> str:
@@ -385,6 +403,9 @@ class _Scope:
                        "translated to English yet; those names were compared as written. Search again to translate more.")
         if self.missing:
             out.append("Folders that do not exist: " + ", ".join(self.missing))
+        if self.catalog:
+            out.append(f"File list from the index ({datetime.fromtimestamp(self.catalog):%m-%d %H:%M}; Downloads and "
+                       "Desktop listed now). Files added elsewhere since then may be missing.")
         return out
 
 
@@ -399,7 +420,9 @@ def _collect(raw_roots: Any, kind: Any, year: int | None, terms: list[str], hctx
     rg = shutil.which("rg")
     deadline = time.monotonic() + LIST_TIMEOUT_S
     pairs: list[tuple[Path, Path]] = []
-    for root in roots:
+    catalog = _from_catalog(roots, exts, hctx)            # 큰 범위(홈·드라이브 전체)는 색인의 파일 목록에서 (M7.5)
+    listed_roots = roots if catalog is None else _fresh_places(roots, hctx)
+    for root in listed_roots:
         if root.is_file():
             pairs.append((root.parent, root))
             continue
@@ -425,6 +448,7 @@ def _collect(raw_roots: Any, kind: Any, year: int | None, terms: list[str], hctx
 
     cands: list[_Candidate] = []                       # 겹치는 폴더(홈과 다운로드 등)에서 두 번 세지 않게
     seen_files: set[str] = set()
+    live: list[_Candidate] = []
     for root, p in pairs:
         file_key = os.path.normcase(str(p))
         if file_key in seen_files:
@@ -435,13 +459,19 @@ def _collect(raw_roots: Any, kind: Any, year: int | None, terms: list[str], hctx
         except ValueError:
             rel = nfc(p.name).casefold()
         english, foreign = split_name(rel)
-        cands.append(_Candidate(root, p, rel, english, foreign))
+        (live if catalog is not None else cands).append(_Candidate(root, p, rel, english, foreign))
+    if catalog is not None:                            # 지금 훑은 곳(다운로드·바탕 화면)은 실제 파일로, 나머지는 목록에서
+        for c in live:
+            c.stat = visible(c.root, c.path)
+        live = [c for c in live if c.stat is not None]
+        cands, gloss, untranslated = _catalog_cands(catalog[0], live, seen_files, year, terms, hctx)
+        return _Scope(roots, missing, exts, cands, True, fast, visible, gloss, untranslated, catalog[1])
 
     # 영어로 통일: 검색어와 이름 속 영어가 아닌 낱말을 영어 키워드로 옮긴다 (캐시에 없으면 모델에게 물음)
     gloss: dict[str, tuple[str, ...]] = {}
     untranslated = 0
     small = len(cands) <= SCAN_LIMIT
-    if small:                                          # 범위가 작으면 미리 걸러 두고 최근 파일의 낱말부터 옮긴다
+    if small:                                        # 범위가 작으면 미리 걸러 두고 최근 파일의 낱말부터 옮긴다
         for c in cands:
             c.stat = visible(c.root, c.path)
         cands = [c for c in cands if c.stat is not None]
@@ -452,6 +482,137 @@ def _collect(raw_roots: Any, kind: Any, year: int | None, terms: list[str], hctx
                                       deadline=time.monotonic() + GLOSS_BUDGET_S)
         untranslated = len({tok for tok in names if tok not in gloss})
     return _Scope(roots, missing, exts, cands, small, fast, visible, gloss, untranslated)
+
+
+def _rel(path: str, root: Path) -> str:
+    base = str(root)
+    rel = path[len(base):].lstrip("\\/") if path.startswith(base) else Path(path).name
+    return nfc(rel).casefold()
+
+
+def _name_subs(terms: list[str], gloss: dict[str, tuple[str, ...]]) -> list[str]:
+    """이름에 이 가운데 하나라도 들어 있어야 낱말이 맞을 수 있다 (큰 범위에서 후보를 미리 줄이려고):
+    낱말과 그 줄기, 영어가 아닌 낱말의 영어 뜻, 그 뜻을 가진 다른 언어 낱말 (이미 옮겨 둔 것)."""
+    subs: set[str] = set()
+    for t in terms:
+        meant = {stem(w) for w in gloss.get(t, ())} if is_foreign(t) else {stem(t)}
+        subs |= {t} | meant
+        subs |= {tok for tok, words in gloss.items() if any(stem(w) in meant for w in words)}
+    return [x for x in subs if len(x) >= 2]
+
+
+def _catalog_cands(rows: list[tuple[Path, content_index.Entry]], live: list[_Candidate], seen: set[str],
+                   year: int | None, terms: list[str], hctx: HandContext
+                   ) -> tuple[list[_Candidate], dict[str, tuple[str, ...]], int]:
+    """파일 목록에서 후보 (M7.5): 최근 순. 낱말이 있으면 이름이 맞을 수 있는 것만 (수십만 개를 다 만들지 않게).
+    최근 SCAN_LIMIT개 이름의 낱말은 영어로 옮겨 둔다 (작은 범위와 같게)."""
+    kept: list[tuple[Path, content_index.Entry, str]] = []
+    for root, e in rows:
+        if e.key in seen:
+            continue
+        seen.add(e.key)
+        if year and datetime.fromtimestamp(e.mtime / 1e9).year != year and str(year) not in Path(e.path).name:
+            continue
+        kept.append((root, e, _rel(e.path, root)))
+    kept.sort(key=lambda x: -x[1].mtime)
+    gloss: dict[str, tuple[str, ...]] = {}
+    untranslated = 0
+    if terms and hctx.glossary is not None:
+        names = [tok for _, _, rel in kept[:SCAN_LIMIT] for tok in split_name(rel)[1]]
+        names += [tok for c in live for tok in c.foreign]
+        gloss = hctx.glossary.english([t for t in terms if is_foreign(t)] + names,
+                                      deadline=time.monotonic() + GLOSS_BUDGET_S)
+        untranslated = len({tok for tok in names if tok not in gloss})
+        subs = _name_subs(terms, gloss)
+        kept = [k for k in kept if any(x in k[2] for x in subs)]
+    cands = list(live)
+    for root, e, rel in kept:
+        english, foreign = split_name(rel)
+        cands.append(_Candidate(root, Path(e.path), rel, english, foreign, _CatStat(e.size, e.mtime), e))
+    cands.sort(key=lambda c: -c.stat.st_mtime)         # type: ignore[union-attr]
+    return cands, gloss, untranslated
+
+
+def user_places(hctx: HandContext) -> list[str]:
+    """연구원님 자료가 있을 곳: 사진·바탕 화면·다운로드·문서와 시스템 드라이브가 아닌 드라이브(구글 드라이브 등).
+    사진·스캔을 뒤에서 볼 때와 살펴보기에서 그림을 고를 때 여기를 먼저 (M7.6)."""
+    out: list[str] = []
+    for word in ("~/Pictures", "~/Desktop", "~/Downloads", "~/Documents", "~/OneDrive"):
+        try:
+            out += [str(p) for p in _root_candidates(word, hctx) if p.is_dir()]
+        except ToolError:
+            continue
+    system = os.environ.get("SystemDrive", "C:").rstrip("\\/").casefold()
+    for r in content_index.all_roots(hctx.places.os, hctx.places.home):
+        if hctx.places.os == "windows" and r.rstrip("\\/").casefold() == system:
+            continue                                   # 시스템 드라이브 전체는 아님 (프로그램 그림이 많다)
+        if r != hctx.places.home:
+            out.append(r)
+    return list(dict.fromkeys(out))
+
+
+def _photo_first(cands: list[_Candidate], hctx: HandContext) -> list[_Candidate]:
+    """그림 후보 순서: 연구원님 자료가 있을 곳 먼저, 사진 형식 먼저, 그다음 최근 순."""
+    places = [content_index.file_key(p) for p in user_places(hctx)]
+    places = [p if p.endswith(("\\", "/")) else p + os.sep for p in places]
+
+    def key(c: _Candidate) -> tuple:
+        k = content_index.file_key(c.path)
+        return (0 if any(k.startswith(p) for p in places) else 1,
+                0 if _ext(c.path) in content_index.PHOTO_TYPES else 1, -c.stat.st_mtime)   # type: ignore[union-attr]
+
+    return sorted(cands, key=key)
+
+
+def _big(root: Path, hctx: HandContext) -> bool:
+    """드라이브 전체, 홈 전체처럼 큰 범위 (작은 폴더는 지금 훑는 게 정확하고 빠르다)."""
+    home = Path(hctx.places.home)
+    return root == Path(root.anchor) or root == home or home.is_relative_to(root)
+
+
+def _from_catalog(roots: list[Path], exts: tuple[str, ...], hctx: HandContext
+                  ) -> tuple[list[tuple[Path, content_index.Entry]], float] | None:
+    """색인의 파일 목록 (M7.5): 범위가 크고, 목록이 한 번 다 찼고, 색인한 폴더가 범위를 다 덮을 때만.
+    [(범위, 항목)], 목록을 다 적은 때."""
+    if not any(_big(r, hctx) for r in roots) or any(r.is_file() for r in roots):
+        return None
+    idx = content_index.open_index(hctx.home)
+    if idx is None:
+        return None
+    try:
+        done = float(idx.meta("catalog_finished") or 0)
+        indexed = [content_index.file_key(r) for r in json.loads(idx.meta("roots") or "[]")]
+        if not done or not indexed:
+            return None
+
+        def covered(r: Path) -> bool:
+            k = content_index.file_key(r)
+            return any(k == i or k.startswith(i if i.endswith(("\\", "/")) else i + os.sep) for i in indexed)
+
+        if not all(covered(r) for r in roots):
+            return None
+        rows: list[tuple[Path, content_index.Entry]] = []
+        for r in roots:
+            rows += [(r, e) for e in idx.catalog(str(r), exts)]
+        return rows, done
+    except (sqlite3.Error, ValueError):
+        return None
+    finally:
+        idx.close()
+
+
+def _fresh_places(roots: list[Path], hctx: HandContext) -> list[Path]:
+    """파일 목록을 쓸 때도 지금 훑는 곳: 다운로드·바탕 화면 (방금 받은 파일이 목록에 아직 없을 수 있어서)."""
+    out: list[Path] = []
+    for word in ("~/Downloads", "~/Desktop"):
+        try:
+            places = _root_candidates(word, hctx)
+        except ToolError:
+            continue
+        for p in places:
+            if p.is_dir() and any(p == r or p.is_relative_to(r) for r in roots):
+                out.append(p)
+    return out
 
 
 def _name_match(c: _Candidate, terms: list[str], gloss: dict[str, tuple[str, ...]]) -> tuple[int, int]:
@@ -496,14 +657,18 @@ def search(args: dict[str, Any], hctx: HandContext) -> str:
         hits.append((rank, c))
     hits.sort(key=lambda h: (h[0], -h[1].stat.st_mtime))    # type: ignore[union-attr]  글자 그대로 맞은 것 먼저, 그다음 최근 순
 
-    found_in: list[tuple[_Candidate, str, int]] = []
+    found_in: list[tuple[_Candidate, str, int, int]] = []   # (파일, 맞은 자리, 쪽, 0 글자 그대로 / 1 영어 뜻으로)
     cov = _Coverage()
-    if content:                                        # 내용까지: 이름이 맞지 않은 파일의 글 (pdf·docx·글 파일)
+    narrowed = _narrowed(args.get("roots"), sc, hctx)   # 모든 드라이브가 기본인데 좁혀 찾았으면 (M7.6)
+    if content and sc.catalog:                         # 큰 범위: 색인에서 먼저 찾고, 그 범위 안 파일 수는 목록으로 (M7.5)
+        named = {content_index.file_key(c.path) for _, c in hits}
+        found_in, cov, meaning = _catalog_content(sc, terms, query, year, named, hctx, started)
+    elif content:                                      # 내용까지: 이름이 맞지 않은 파일의 글 (pdf·docx·글 파일)
         files = _visible_files(pool, sc.visible)
         from_index, rest, cov, indexed = _index_hits(files, terms, sc.gloss, hctx)   # 색인에 있는 것은 색인에서 (M7.1)
         found_now, cov_now = _content_hits(rest, terms, sc.gloss, hctx, sc.fast, started)
         found_in, cov = from_index + found_now, _merge(cov, cov_now)
-        taken = {content_index.file_key(c.path) for c, _, _ in found_in}
+        taken = {content_index.file_key(c.path) for c, _, _, _ in found_in}
         meaning = _meaning(query, [(c, e) for c, e in indexed if content_index.file_key(c.path) not in taken],
                            sc.gloss, hctx)                                                      # 뜻으로 (M7.2)
 
@@ -512,8 +677,10 @@ def search(args: dict[str, Any], hctx: HandContext) -> str:
     if total > limit:
         head += f", showing {limit}"
     lines = [f"{head} (scope: {sc.label})"]
-    entries = [_hit_line(c, sc.gloss) for _, c in hits] + [_content_line(c, snip, sc.gloss, page)
-                                                            for c, snip, page in found_in]
+    entries = []                                       # 글자 그대로 맞은 것(이름, 내용) 먼저, 영어 뜻으로 맞은 것은 뒤로 (M7.5)
+    for rank in (0, 1):
+        entries += [_hit_line(c, sc.gloss) for r, c in hits if r == rank]
+        entries += [_content_line(c, snip, sc.gloss, page) for c, snip, page, r in found_in if r == rank]
     lines += entries[:limit]
     if not total and terms:
         if sc.small:
@@ -521,7 +688,8 @@ def search(args: dict[str, Any], hctx: HandContext) -> str:
         else:
             lines.append(f"No file name matches. The scope has {len(sc.cands)} files, too many to list; narrow roots or kind.")
         if not content:
-            in_text = _index_count(_visible_files(pool, sc.visible), terms, sc.gloss, hctx)
+            in_text = (len(_catalog_content(sc, terms, "", year, set(), hctx, started, count_only=True)[0]) if sc.catalog
+                       else _index_count(_visible_files(pool, sc.visible), terms, sc.gloss, hctx))
             if in_text:                                # 색인이 있으면 내용에도 있는지 알려 준다 (볼지는 모델이 정한다)
                 lines.append(f"The text of {in_text} file{'s' if in_text != 1 else ''} contains these words "
                              "(content index); search again with content=true to list them.")
@@ -530,9 +698,22 @@ def search(args: dict[str, Any], hctx: HandContext) -> str:
         lines += meaning
         lines += _coverage_lines(cov, _how(cov))
     lines += sc.notes()
+    if narrowed:
+        lines.append(narrowed)
     if not hits and not terms:
         lines.append("No file matches.")
     return "\n".join(lines)
+
+
+def _narrowed(raw: Any, sc: _Scope, hctx: HandContext) -> str:
+    """기본 범위가 모든 드라이브인데 roots로 좁혔으면, 찾지 않은 곳을 알려 준다 (M7.6: 홈만 찾아 구글 드라이브 G:를 놓침)."""
+    if not raw or ALL_DRIVES not in (hctx.search_default or []) or ALL_DRIVES in (raw if isinstance(raw, list) else [raw]):
+        return ""
+    drives = content_index.all_roots(hctx.places.os, hctx.places.home)
+    if all(any(Path(d) == r for r in sc.roots) for d in drives):
+        return ""
+    return (f"Only {sc.label} was searched. Leave roots out to search every drive ({', '.join(drives)}); "
+            "the file may be on another drive.")
 
 
 # ---------------------------------------------------------------------- 내용 읽기 (찾기·살펴보기)
@@ -551,12 +732,13 @@ class _Coverage:
     other: Counter = field(default_factory=Counter)    # 아직 내용을 못 읽는 종류 (hwp, xlsx, png ...)
     indexed: int = 0                # 색인에서 본 파일 (글 전체, M7.1)
     partial: int = 0                # 색인했지만 길어서 앞부분만 (긴 pdf)
+    images: int = 0                 # 아직 보지 않은 그림 (뒤에서 글자 인식을 기다림, M7.5)
 
 
 def _merge(a: "_Coverage", b: "_Coverage") -> "_Coverage":
     out = _Coverage()
     for name in ("wanted", "checked", "no_text", "locked", "failed", "too_large", "cloud", "protected", "left",
-                 "indexed", "partial"):
+                 "indexed", "partial", "images"):
         setattr(out, name, getattr(a, name) + getattr(b, name))
     out.other = a.other + b.other
     return out
@@ -614,8 +796,8 @@ def _read_contents(files: list[_Candidate], deep: bool, deadline: float, hctx: H
             if time.monotonic() > deadline:
                 cov.left += 1
                 continue
-            if _is_cloud_only(c.path):
-                cov.cloud += 1                         # 읽으면 내려받아진다
+            if not hctx.cloud and _is_cloud_only(c.path):
+                cov.cloud += 1                         # 읽으면 내려받아진다 ([index] cloud = false일 때만 건너뜀)
                 continue
             assert c.stat is not None
             if ext in TEXT_EXTS:
@@ -650,7 +832,7 @@ def _read_contents(files: list[_Candidate], deep: bool, deadline: float, hctx: H
 
 
 def _index_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tuple[str, ...]], hctx: HandContext
-                ) -> tuple[list[tuple[_Candidate, str, int]], list[_Candidate], _Coverage,
+                ) -> tuple[list[tuple[_Candidate, str, int, int]], list[_Candidate], _Coverage,
                            list[tuple[_Candidate, content_index.Entry]]]:
     """색인에 있고 그 뒤로 바뀌지 않은 파일은 색인에서 찾는다 (글 전체, 파일을 열지 않음).
     나머지(색인에 없음, 바뀜, 클라우드 전용)는 돌려준다: 그 자리에서 읽는다.
@@ -662,21 +844,29 @@ def _index_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tupl
             idx.close()
         return [], files, cov, []
     try:
-        entries = idx.entries([content_index.file_key(c.path) for c in files])
+        need = [content_index.file_key(c.path) for c in files if c.entry is None]
+        entries = idx.entries(need) if need else {}
         fresh: list[tuple[_Candidate, content_index.Entry]] = []
         rest: list[_Candidate] = []
         for c in files:
-            e = entries.get(content_index.file_key(c.path))
-            if e is not None and c.stat is not None and e.status != "cloud" and e.fresh(c.stat):
+            e = c.entry if c.entry is not None else entries.get(content_index.file_key(c.path))
+            if e is not None and c.stat is not None and e.fresh(c.stat) and e.status not in ("cloud", "pending", "name"):
                 fresh.append((c, e))
             else:
-                rest.append(c)
+                rest.append(c)                       # 색인에 없음·바뀜·아직 안 읽음·글을 읽지 않는 종류: 그 자리에서
         if not fresh:
             return [], rest, cov, []
         variants = [_variants(t, gloss) for t in terms]
-        matched = set(idx.match(variants))
-        out: list[tuple[_Candidate, str, int]] = []
+        order = {fid: i for i, fid in enumerate(idx.match(variants, limit=200_000))}   # 맞는 정도 순 (bm25)
+        matched = set(order)
+        literal = matched
+        if any(len(v) > 1 for v in variants):         # 영어 뜻으로만 맞은 것은 뒤로 ("면허증" -> license 파일들)
+            literal = set(idx.match([[t] for t in terms], limit=200_000))
+        hits: list[tuple[int, _Candidate, content_index.Entry]] = []
         for c, e in fresh:
+            if e.status == "image":
+                cov.images += 1                      # 그림은 뒤에서 보기 전에는 글이 없다
+                continue
             cov.wanted += 1
             cov.indexed += 1
             if e.status == "ok":
@@ -691,8 +881,12 @@ def _index_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tupl
             else:
                 cov.failed += 1
             if e.status == "ok" and e.id in matched:
-                snip, page = idx.snippet(e.id, variants[0]) if len(out) < SEARCH_MAX else ("", 0)
-                out.append((c, snip, page))
+                hits.append((0 if e.id in literal else 1, c, e))
+        hits.sort(key=lambda h: (h[0], order[h[2].id]))   # 글자 그대로 먼저, 그 안에서는 맞는 정도 순 (M7.6)
+        out: list[tuple[_Candidate, str, int, int]] = []
+        for rank, c, e in hits:
+            snip, page = idx.snippet(e.id, variants[0]) if len(out) < SEARCH_MAX else ("", 0)
+            out.append((c, snip, page, rank))
         return out, rest, cov, [(c, e) for c, e in fresh if e.status == "ok"]
     except sqlite3.Error:                              # 색인을 못 읽으면 예전처럼 그 자리에서
         return [], files, _Coverage(), []
@@ -740,6 +934,117 @@ def _meaning(query: str, files: list[tuple[_Candidate, content_index.Entry]], gl
         idx.close()
 
 
+def _prefixes(roots: list[Path]) -> list[str]:
+    out = []
+    for r in roots:
+        k = content_index.file_key(r)
+        out.append(k if k.endswith(("\\", "/")) else k + os.sep)
+    return out
+
+
+def _catalog_content(sc: _Scope, terms: list[str], query: str, year: int | None, named: set[str], hctx: HandContext,
+                     started: float, count_only: bool = False
+                     ) -> tuple[list[tuple[_Candidate, str, int, int]], _Coverage, list[str]]:
+    """큰 범위의 내용 찾기 (M7.5): 색인의 글에서 바로 찾고 (범위·종류·연도로 거름), 파일 수는 목록에서 센다.
+    색인을 아직 못 한 파일(pending, cloud)과 지금 훑은 곳의 바뀐 파일만 그 자리에서 읽는다."""
+    cov = _Coverage()
+    idx = content_index.open_index(hctx.home)
+    if idx is None:
+        return [], cov, []
+    try:
+        prefixes = _prefixes(sc.roots)
+        variants = [_variants(t, sc.gloss) for t in terms]
+        matched = idx.match(variants, limit=200_000)
+        order = {fid: i for i, fid in enumerate(matched)}                               # 맞는 정도 순 (bm25)
+        literal = set(idx.match([[t] for t in terms], limit=200_000)) if any(len(v) > 1 for v in variants) else set(matched)
+        live = {content_index.file_key(c.path): c for c in sc.cands if c.entry is None}     # 다운로드·바탕 화면
+        hits: list[tuple[int, _Candidate, content_index.Entry]] = []
+        for e in idx.rows(matched):
+            if (e.status != "ok" or e.version != content_index.VERSION or e.key in named
+                    or not any(e.key.startswith(x) for x in prefixes)
+                    or (sc.exts and content_index._ext(e.path) not in sc.exts)):
+                continue
+            c = live.get(e.key)
+            if c is not None and not e.fresh(c.stat):                                    # type: ignore[arg-type]
+                continue                                 # 색인한 뒤로 바뀜: 아래에서 그 자리에서 읽는다
+            if year and datetime.fromtimestamp(e.mtime / 1e9).year != year and str(year) not in Path(e.path).name:
+                continue
+            root = next((r for r, x in zip(sc.roots, prefixes) if e.key.startswith(x)), sc.roots[0])
+            rel = _rel(e.path, root)
+            english, foreign = split_name(rel)
+            hits.append((0 if e.id in literal else 1,
+                         c or _Candidate(root, Path(e.path), rel, english, foreign, _CatStat(e.size, e.mtime), e), e))
+        if count_only:
+            return [(c, "", 0, r) for r, c, _ in hits], cov, []
+        hits.sort(key=lambda h: (h[0], order[h[2].id]))   # 글자 그대로 먼저, 그 안에서는 맞는 정도 순 (M7.6)
+        found: list[tuple[_Candidate, str, int, int]] = []
+        for rank, c, e in hits:
+            snip, page = idx.snippet(e.id, variants[0]) if len(found) < SEARCH_MAX else ("", 0)
+            found.append((c, snip, page, rank))
+
+        counts = idx.scope_counts(prefixes, sc.exts)
+        by = counts["status"]
+        indexed = sum(by.get(k, 0) for k in ("ok", "no_text", "locked", "too_large", "error"))
+        cov.indexed = indexed
+        cov.wanted = indexed + by.get("pending", 0) + by.get("cloud", 0)
+        cov.checked, cov.no_text, cov.locked = by.get("ok", 0), by.get("no_text", 0), by.get("locked", 0)
+        cov.too_large, cov.failed, cov.images = by.get("too_large", 0), by.get("error", 0), by.get("image", 0)
+        cov.partial = counts["partial"]
+        cov.other = Counter({ext or "no extension": n for ext, n in counts["names"].items()
+                             if ext not in IMAGE_EXTS})
+
+        # 그 자리에서: 아직 색인 못 한 파일, 지금 훑은 곳에서 바뀐 파일
+        later = [_Candidate(r, Path(e.path), _rel(e.path, r), *split_name(_rel(e.path, r)), _CatStat(e.size, e.mtime), e)
+                 for e in idx.scope_rows(prefixes, sc.exts, ("pending", "cloud"))
+                 for r in [next((r for r, x in zip(sc.roots, prefixes) if e.key.startswith(x)), sc.roots[0])]]
+        changed = [c for k, c in live.items() if k not in named]
+        known = idx.entries([content_index.file_key(c.path) for c in changed]) if changed else {}
+        changed = [c for c in changed if not (known.get(content_index.file_key(c.path))
+                                              and known[content_index.file_key(c.path)].fresh(c.stat))]   # type: ignore[arg-type]
+        now_found, now_cov = _content_hits(changed + later, terms, sc.gloss, hctx, sc.fast, started)
+        cov.left += now_cov.left
+        cov.cloud += now_cov.cloud
+        found += [f for f in now_found if content_index.file_key(f[0].path) not in {content_index.file_key(x[0].path)
+                                                                                    for x in found}]
+        meaning = _catalog_meaning(idx, query, prefixes, sc, {e.id for _, _, e in hits}, hctx)
+        return found, cov, meaning
+    except sqlite3.Error:
+        return [], cov, []
+    finally:
+        idx.close()
+
+
+def _catalog_meaning(idx: content_index.FileIndex, query: str, prefixes: list[str], sc: _Scope, exclude: set[int],
+                     hctx: HandContext) -> list[str]:
+    """큰 범위의 뜻으로 찾기 (색인의 벡터를 범위로 바로 고른다)."""
+    emb = hctx.embedder
+    if emb is None or not query.strip():
+        return []
+    try:
+        q = emb.queries([query])[0]
+    except LLMError as e:
+        return [f"Search by meaning is unavailable: {e}"]
+    near, ready, total = idx.nearest_in(prefixes, sc.exts, q, emb.model, exclude)
+    if not ready:
+        return [f"Search by meaning: not ready yet ({emb.model} makes vectors in the background)."] if total else []
+    shown = [n for n in near if n[1] >= MIN_SIMILARITY][:MEANING_SHOWN]
+    lines: list[str] = []
+    if shown:
+        lines.append("Close in meaning (the words may differ; read before relying on them):")
+    for fid, score, start in shown:
+        e = idx.rows([fid])[0]
+        root = next((r for r, x in zip(sc.roots, prefixes) if e.key.startswith(x)), sc.roots[0])
+        rel = _rel(e.path, root)
+        c = _Candidate(root, Path(e.path), rel, *split_name(rel), _CatStat(e.size, e.mtime), e)
+        body = idx.body(fid)
+        page = body.count(content_index.PAGE, 0, start) + 1 if content_index.PAGE in body else 0
+        piece = " ".join(body[start:start + MEANING_SNIPPET].replace(content_index.PAGE, " ").split())
+        lines.append(_hit_line(c, sc.gloss) + f' · meaning {score:.2f}' + (f" (p.{page})" if page else "") + f': "{piece}…"')
+    if ready < total:
+        lines.append(f"By meaning: {ready} of {total} files with text have vectors so far (the rest are still being made).")
+    return lines
+
+
 def _index_count(files: list[_Candidate], terms: list[str], gloss: dict[str, tuple[str, ...]],
                  hctx: HandContext) -> int:
     """이름은 안 맞지만 글에 낱말이 다 있는 파일 수 (색인으로만, 파일을 열지 않음). 색인이 없으면 0."""
@@ -750,7 +1055,7 @@ def _index_count(files: list[_Candidate], terms: list[str], gloss: dict[str, tup
 
 
 def _content_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tuple[str, ...]], hctx: HandContext,
-                  fast: Places, started: float) -> tuple[list[tuple[_Candidate, str, int]], _Coverage]:
+                  fast: Places, started: float) -> tuple[list[tuple[_Candidate, str, int, int]], _Coverage]:
     """낱말이 모두 글 안에 있는 파일과 그 자리 (낱말마다 따로, 영어가 아닌 낱말은 영어 뜻도)."""
     read, cov = _read_contents(files, True, started + CONTENT_BUDGET_S, hctx, fast)
     variants = [_variants(t, gloss) for t in terms]
@@ -759,8 +1064,9 @@ def _content_hits(files: list[_Candidate], terms: list[str], gloss: dict[str, tu
         if doc.status != "ok":
             continue
         text = nfc(doc.text())
-        if _matches(text.casefold(), variants):
-            hits.append((c, docs.snippet(text, variants[0]), 0))
+        text_cf = text.casefold()
+        if _matches(text_cf, variants):
+            hits.append((c, docs.snippet(text, variants[0]), 0, 0 if _matches(text_cf, [[t] for t in terms]) else 1))
     return hits, cov
 
 
@@ -771,7 +1077,7 @@ def _content_line(c: _Candidate, snip: str, gloss: dict[str, tuple[str, ...]], p
 
 def _coverage_lines(cov: _Coverage, how: str) -> list[str]:
     """무엇을 읽었고 무엇을 못 읽었는지."""
-    if not cov.wanted and not cov.other:
+    if not cov.wanted and not cov.other and not cov.images:
         return []
     lines = [f"Contents checked: {cov.checked} of {cov.wanted} files ({how})."]
     unread = [f"{n} {what}" for n, what in (
@@ -783,6 +1089,9 @@ def _coverage_lines(cov: _Coverage, how: str) -> list[str]:
         lines.append("Not read: " + ", ".join(unread) + ".")
     if cov.no_text:
         lines.append("Scanned pdfs have no text to search; fs.read can read them by OCR (slow, a few pages at a time).")
+    if cov.images:
+        lines.append(f"{cov.images} images were not looked at yet (the index reads them while GLaDOS is idle); "
+                     "fs.inspect can look at images now with a yes/no question.")
     if cov.other:
         kinds = ", ".join(f"{n} {ext}" for ext, n in cov.other.most_common(5))
         lines.append(f"Contents of these types cannot be read yet: {kinds}{' ...' if len(cov.other) > 5 else ''}.")
@@ -874,15 +1183,40 @@ def inspect(args: dict[str, Any], hctx: HandContext) -> str:
     sc = _collect(raw, args.get("kind"), year, terms, hctx)
     files = [c for c in sc.cands if not terms or _name_match(c, terms, sc.gloss)[0] == len(terms)]
     files = _visible_files(files, sc.visible)
+    seeing = ocr.can_see(hctx.llm)
+    if seeing and sc.exts and all(e in IMAGE_EXTS for e in sc.exts):
+        files = _photo_first(files, hctx)              # 그림만 볼 때: 연구원님 자료·사진 형식 먼저 (M7.6)
     over = max(0, len(files) - limit)
     files = files[:limit]
 
-    read, cov = _read_contents(files, False, started + INSPECT_READ_S, hctx, sc.fast)
+    images = [c for c in files if seeing and _ext(c.path) in IMAGE_EXTS]       # 그림은 직접 본다 (M7.5)
+    shown = {id(c) for c in images}
+    read, cov = _read_contents([c for c in files if id(c) not in shown], False, started + INSPECT_READ_S, hctx, sc.fast)
     key = question.casefold()
     answers: dict[int, tuple[str, str]] = {}           # id(파일) -> (답, 까닭)
     late = 0
+    looked = 0
     cache = docs.DocCache(hctx.home / "cache" / DOC_CACHE)
     try:
+        for c in images:
+            assert c.stat is not None
+            known = cache.answer(c.path, c.stat, key, hctx.model_name + ocr.DESCRIBED)
+            if known is not None:
+                answers[id(c)] = known
+                continue
+            if time.monotonic() > started + INSPECT_BUDGET_S:
+                late += 1
+                continue
+            try:
+                got = ocr.ask(hctx.llm, ocr.image_png(c.path, ocr.INSPECT_SIDE), question)
+            except LLMError as e:
+                raise tool_error("tool.inspect_failed", detail=str(e)) from None
+            except Exception as e:                     # 열 수 없는 그림 (heic 등)
+                answers[id(c)] = ("unsure", f"could not open the image ({type(e).__name__})")
+                continue
+            answers[id(c)] = got
+            looked += 1
+            cache.put_answer(c.path, c.stat, key, hctx.model_name + ocr.DESCRIBED, *got)    # type: ignore[arg-type]
         pending = []
         for c, doc in read:
             if doc.status != "ok":
@@ -913,7 +1247,8 @@ def inspect(args: dict[str, Any], hctx: HandContext) -> str:
     no = sum(1 for c in files if answers.get(id(c), ("",))[0] == "no")
     asked = len(yes) + len(unsure) + no
     lines = [f"{len(yes)} of {asked} inspected files answered yes (scope: {sc.label})",
-             f'Question for each file: "{question}" (answered by the model from the name, title, and first page).']
+             f'Question for each file: "{question}" (answered by the model from the name, title, and first page'
+             + ('; images from the picture itself).' if images else ').')]
     if not files:
         lines.append("No file names match the query." if terms else "There are no files in this scope.")
     entries: list[str] = []
@@ -925,6 +1260,8 @@ def inspect(args: dict[str, Any], hctx: HandContext) -> str:
         entries += [_hit_line(c, sc.gloss) + f" · {why}" for c, why in unsure]
     tail = [f"No: {no} files."] if no else []
     tail += _coverage_lines(cov, "the beginning of each file")
+    if images:
+        tail.append(f"Images: {len(images) - late} of {len(images)} looked at ({looked} new, the rest remembered).")
     if late:
         tail.append(f"Time limit: {late} readable files were not inspected yet. Ask again to continue; "
                     "answers so far are remembered.")
@@ -1097,20 +1434,15 @@ def _read_image(p: Path, hctx: HandContext) -> tuple[str, str]:
     model = hctx.model_name or "model"
     cache = docs.DocCache(hctx.home / "cache" / DOC_CACHE)
     try:
-        known = cache.ocr(p, st, model)
-        if 0 in known:
-            text = known[0]
-        else:
-            try:
-                text = ocr.transcribe(hctx.llm, ocr.image_png(p))
-            except LLMError as e:
-                raise tool_error("tool.ocr_failed", detail=str(e)) from None
-            except Exception as e:                     # 그림을 열 수 없음
-                raise tool_error("tool.image_open", detail=f"{type(e).__name__}: {e}"[:200]) from None
-            cache.put_ocr(p, st, 0, model, text)
+        try:
+            text = ocr.describe_cached(hctx.llm, p, st, model, cache)    # 무엇의 그림인지 + 보이는 글 (M7.5)
+        except LLMError as e:
+            raise tool_error("tool.ocr_failed", detail=str(e)) from None
+        except Exception as e:                         # 그림을 열 수 없음
+            raise tool_error("tool.image_open", detail=f"{type(e).__name__}: {e}"[:200]) from None
     finally:
         cache.close()
-    return text or "(no text found in this image)", "image, read by OCR with the local model (names and numbers may be misread)"
+    return text, "image, read by OCR with the local model (names and numbers may be misread)"
 
 
 def _read_hwp(p: Path) -> tuple[str, str]:
@@ -1241,15 +1573,20 @@ def edit(args: dict[str, Any], hctx: HandContext) -> str:
 
 
 # ---------------------------------------------------------------------- 등록
+def _default_scope(hctx: HandContext) -> str:
+    roots = hctx.search_default or ["~"]
+    return "every drive (C:, Google Drive, ...)" if ALL_DRIVES in roots else ", ".join(roots)
+
+
 def fs_tools(hctx: HandContext) -> list[Tool]:
     return [
         Tool(
             "fs.search",
             "Find files by name; with content=true, also by words inside them (text, pdf, docx, hwp). query: English "
             "keywords; names in other languages are matched by their English meaning, shown after \"en:\". "
-            "kind: pdf, docx, md, txt, text, code, ... year: year modified or year in the name. roots: folders to "
-            "search, e.g. [\"~/Downloads\"], [\"~/Documents\"], [\"~/Desktop\"], whole home [\"~\"] "
-            "(default: Downloads, Documents, Desktop). The result says what was searched",
+            "kind: pdf, docx, hwp, image, text, code, ... year: year modified or year in the name. roots: leave it "
+            f"out to search {_default_scope(hctx)}; set it only to a folder the Researcher named, e.g. "
+            "[\"~/Downloads\"]. The result says what was searched",
             SEARCH_PARAMS,
             lambda a: search(a, hctx),
         ),
@@ -1257,7 +1594,8 @@ def fs_tools(hctx: HandContext) -> list[Tool]:
             "fs.inspect",
             "Look inside many files at once: for each file, read its beginning (title, first page) and answer a "
             "yes/no question about it, e.g. question=\"Is this an invoice?\" or \"Is this about protein folding?\". "
-            "Use it when names cannot tell you what the files are. roots, kind, year, and query choose the files "
+            "Images are looked at directly. Use it when names cannot tell you what the files are. roots, kind, year, "
+            "and query choose the files "
             "as in fs.search; paths lists files directly. Returns the files answered yes or unsure, with a short "
             "reason, and how many were read",
             INSPECT_PARAMS,

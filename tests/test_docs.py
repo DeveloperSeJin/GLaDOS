@@ -339,7 +339,7 @@ def test_model_plans_then_inspects_through_the_loop(lab):
     result = run_task("그 중에서 논문 찾아줘", llm=llm, policy=Policy(base_layers()), ctx=ctx, tools=tools,
                       limits=LoopLimits(), system_prompt="test", emit=events.append)
     assert result.status == "done"
-    assert llm.calls[0][1]["required"] == ["plan", "thought", "action", "done"]   # 첫 걸음에는 계획이 꼭
+    assert llm.calls[0][1]["required"][:3] == ["goal", "next", "plan"]   # 움직이기 전에 계획 (M7.7)
     assert llm.calls[1][1]["required"] == ["thought", "action", "done"]
     assert [e.data["plan"] for e in events if e.kind == ev.PLAN] == [plan]
     observation = next(m["content"] for m in llm.calls[1][0] if m["content"].startswith("[result: fs.inspect]"))

@@ -154,7 +154,8 @@ def test_answer_shows_in_chat_and_panel(tmp_path):
             await until(pilot, lambda: not app.job and len(app.engine.memory.turns) == 1)
             card = app.query_one(TaskCard)
             assert card.title_text == "다운로드에서 논문 찾아줘" and card.state == "done" and card.tools == 1
-            assert str(card.kicker.render()).startswith("작업 · 완료 · ") and "도구 1번" in str(card.kicker.render())
+            assert not card.kicker.display                                     # 대화처럼 (M8): 윗줄 없음
+            assert re.search(r"^  완료 · [\d.]+초 · 도구 1번$", card.body.plain(), re.M)   # 일한 만큼은 진행 줄로
             text = chat_text(app)
             assert "논문 1개를 찾았습니다: 학위논문.pdf." in text
             assert "출처: /d/학위논문.pdf" in text and "Found one paper" not in text
@@ -370,6 +371,40 @@ def test_plan_shows_in_process_panel(tmp_path):
     app.engine.close()
 
 
+def test_conversation_turn_shows_like_a_chat(tmp_path):
+    """M8: GLaDOS의 첫 말 -> 진행 줄 -> 답. 계획 단계(영어)는 맥락의 과정에만. 인사는 말만 오간다."""
+    tools = ToolRegistry([Tool("fs.search", "find", run=lambda a: "0 found (scope: C:\\, G:\\)")])
+    plan = {"goal": "Find the license photo.", "next": "act", "plan": ["Search all drives by name.",
+            "Search photo contents."], "check": "It shows a license card.",
+            "say": "I will look in Pictures and Google Drive (G:) first.", "wit": "", "sources": []}
+    hello = {"goal": "Greet.", "next": "answer", "plan": [], "check": "", "say": "Hello, Researcher.", "wit": "",
+             "sources": []}
+    llm = FakeLLM([plan, translation("사진 폴더와 G: 드라이브에서 먼저 찾아보겠습니다."),     # 첫 말도 영어 -> 화면용 번역 (M8.3)
+                   act("fs.search", query="license"), answer("No license photo was found."),
+                   translation("면허증 사진을 찾지 못했습니다."), hello, translation("안녕하세요, 연구원님.")])
+    app = make(tmp_path, llm, tools)
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            await send(pilot, "내 면허증 사진 찾아줘")
+            await until(pilot, lambda: not app.job and app.engine.memory.turns)
+            assert app.aside_visible()
+            card = app.query(TaskCard).last()
+            assert re.fullmatch(r"● GLaDOS\n사진 폴더와 G: 드라이브에서 먼저 찾아보겠습니다\.\n  완료 · [\d.]+초 · 도구 1번\n"
+                                r"● GLaDOS\n면허증 사진을 찾지 못했습니다\.", card.body.plain())
+            assert not card.kicker.display and "Search all drives" not in chat_text(app)
+            side = activity_text(app)
+            assert "사진 폴더와 G: 드라이브에서" in side and "Find the license photo." in side
+            assert "2) Search photo contents." in side
+            await send(pilot, "안녕")
+            await until(pilot, lambda: not app.job and len(app.engine.memory.turns) == 2)
+            chat = app.query(TaskCard).last()
+            assert chat.body.plain() == "● GLaDOS\n안녕하세요, 연구원님." and chat.progress_at is None   # 말만
+            assert len(llm.calls) == 7                                         # 모델은 영어, 화면에 낼 때만 번역
+    run(go())
+    app.engine.close()
+
+
 def test_elapsed_time_and_live_tokens_while_working(tmp_path):
     llm = BlockingMeteredLLM([], block_at=0)
     app = make(tmp_path, llm)
@@ -384,11 +419,12 @@ def test_elapsed_time_and_live_tokens_while_working(tmp_path):
             live = str(card.live.render())
             assert card.live.display and live.startswith("↑ 0   ↓ 2 토큰")          # 건넨·받은 토큰
             assert 'Search Downloads for PDFs."], "thought": "' in live               # 받고 있는 글
-            assert re.search(r"진행 중 · 1단계 · \d+초", str(card.kicker.render()))   # 흐른 시간
+            assert not card.kicker.display                                     # 생각하는 동안은 토큰 칸과 머리글 (M8)
             assert re.search(r"작업 중 · 생각 · 1단계 · \d+초$", str(app.query_one("#status").render()))
             card.started -= 65
+            app._shown_second = -1
             app.refresh_live()
-            assert re.search(r"1분 \d+초", str(card.kicker.render()))
+            assert re.search(r"1분 \d+초", str(app.query_one("#status").render()))
             await pilot.press("escape")
             await until(pilot, lambda: not app.job)
             assert not card.live.display                                               # 멈춰도 지운다
@@ -858,3 +894,198 @@ def test_memory_note_in_approval_box():
     box = tui.approval_dialog(ToolCall("memory.note", {"text": "실험 결과는 표로"}, card=card), d)
     assert box.details.plain.startswith("실험 결과는 표로\n")
     assert [(o[0], o[1]) for o in box.options] == [("once", "기억하기"), ("deny", "기억하지 않기")]
+
+
+# ---------------------------------------------------------------- 마우스: 복사·붙여넣기·링크 (M7.9)
+async def press(pilot, widget, offset, button=1, ctrl=False):
+    """터미널이 보내는 것처럼 누르고 뗀다 (Pilot.click은 App.on_event를 건너뛴다)."""
+    from textual import events
+    from textual.pilot import _get_mouse_message_arguments
+
+    args = _get_mouse_message_arguments(widget, offset, button=button, shift=False, meta=False, control=ctrl)
+    pilot.app.post_message(events.MouseDown(**args))
+    await pilot.pause()
+    pilot.app.post_message(events.MouseUp(**args))
+    await pilot.pause()
+
+
+def answered(tmp_path, fact):
+    llm = FakeLLM([answer(fact, "")])
+    return make(tmp_path, llm, ToolRegistry())
+
+
+def test_web_addresses_in_text():
+    line = "출처: https://a.org/x, https://en.wikipedia.org/wiki/Foo_(bar). 그리고 https://b.org/y에서 (https://c.org/z)"
+    assert [u for _, _, u in tui._urls(line)] == ["https://a.org/x", "https://en.wikipedia.org/wiki/Foo_(bar)",
+                                                 "https://b.org/y", "https://c.org/z"]
+    assert tui.url_at(line, line.index("a.org")) == "https://a.org/x"
+    assert tui.url_at(line, line.index("그리고")) is None
+    text = tui.linkify(tui.Text("see https://a.org/x."))
+    assert [s.style.link for s in text.spans] == ["https://a.org/x"]
+
+
+def test_drag_then_right_click_copies_and_right_click_pastes(tmp_path):
+    app = answered(tmp_path, "Hello. More at https://example.org/guide today.")
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            await send(pilot, "hello")
+            await until(pilot, lambda: not app.job and app.engine.memory.turns)
+            body = app.query(TaskCard).last().body
+            await pilot.mouse_down(body, offset=(0, 1))                 # 끌어서 고르기 (Textual)
+            await pilot.hover(body, offset=(5, 1))
+            await pilot.mouse_up(body, offset=(5, 1))
+            assert app.screen.get_selected_text() == "Hello."
+            await press(pilot, body, (3, 1), button=3)                  # 오른쪽 클릭 = 복사
+            assert app.clip.paste() == "Hello." and app.screen.get_selected_text() is None
+            box = app.query_one(ChatInput)
+            assert box.value == ""
+            await press(pilot, body, (3, 1), button=3)                  # 고른 것이 없으면 붙여넣기
+            assert box.value == "Hello." and box.has_focus
+            app.clip.copy("line one\nline two")
+            await press(pilot, body, (3, 1), button=3)                  # 여러 줄은 붙여넣기 표시로 (보낼 때 펼침)
+            assert box.value == "Hello.[붙여넣은 글 1 · 2줄]"
+    run(go())
+    app.engine.close()
+
+
+def test_ctrl_click_opens_web_links_only(tmp_path):
+    app = answered(tmp_path, "Hello. More at https://example.org/guide today.")
+    opened = []
+    app.open_url = lambda url, new_tab=True: opened.append(url)
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            await send(pilot, "hello")
+            await until(pilot, lambda: not app.job and app.engine.memory.turns)
+            body = app.query(TaskCard).last().body
+            at = body.plain().split("\n")[1].index("example")
+            await press(pilot, body, (at, 1))                           # Ctrl 없이 누르면 열지 않음
+            await press(pilot, body, (2, 1), ctrl=True)                 # 주소가 아닌 곳
+            assert opened == []
+            await press(pilot, body, (at, 1), ctrl=True)
+            assert opened == ["https://example.org/guide"]
+            region = body.content_region
+            assert app.link_at(region.x + at, region.y + 1) == "https://example.org/guide"
+            assert app.screen.get_style_at(region.x + at, region.y + 1).underline   # 링크 모양
+    run(go())
+    app.engine.close()
+
+
+def test_links_in_process_panel_and_sources(tmp_path):
+    app = answered(tmp_path, "Hello.")
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            line = tui.Text("<- Page: https://example.org/a")
+            app.query_one("#activity").write(line)                       # 과정 기록 (숨어 있으면 나중에 그린다)
+            assert [span.style.link for span in line.spans] == ["https://example.org/a"]
+            app.selected = TaskCard("task", "x")
+            app.selected.sources = ["https://example.org/b", "/d/a.pdf"]
+            app.home.display = False
+            app.refresh_aside()
+            shown = app.query_one("#sources").render()
+            assert any(span.style.link == "https://example.org/b" for span in getattr(shown, "spans", []))
+    run(go())
+    app.engine.close()
+
+
+def test_copy_falls_back_to_the_terminal(tmp_path):
+    """운영 체제 클립보드가 안 되면 터미널 복사(OSC 52)로."""
+    app = answered(tmp_path, "Hello.")
+
+    class Broken:
+        def copy(self, text):
+            return False
+
+        def paste(self):
+            return None
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            app._clip = Broken()
+            app.copy_to_clipboard("abc")
+            assert app.clipboard == "abc"                               # Textual이 받아 둠 (OSC 52로 보냄)
+            await press(pilot, app.query_one(ChatInput), (0, 0), button=3)
+            assert app.query_one(ChatInput).value == ""                  # 붙여넣을 것 없음
+    run(go())
+    app.engine.close()
+
+
+def test_system_clipboard_uses_the_os_tools(monkeypatch):
+    from glados import clipboard
+
+    ran = []
+
+    class Done:
+        def __init__(self, out=b""):
+            self.returncode, self.stdout = 0, out
+
+    def fake_run(cmd, **kw):
+        ran.append((cmd[0], kw.get("input")))
+        return Done("붙여넣을 글".encode("utf-8"))
+
+    monkeypatch.setattr(clipboard.subprocess, "run", fake_run)
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: "/usr/bin/" + name if name == "xclip" else None)
+    linux = clipboard.SystemClipboard("linux")
+    assert linux.copy("복사") is True and ran[-1] == ("xclip", "복사".encode("utf-8"))
+    assert linux.paste() == "붙여넣을 글"
+    mac = clipboard.SystemClipboard("mac")
+    assert mac.copy("x") and ran[-1][0] == "pbcopy" and mac.paste() == "붙여넣을 글"
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: None)
+    assert linux.copy("x") is False and linux.paste() is None             # 도구가 없으면 터미널 복사로
+
+
+# ---------------------------------------------------------------- 경로 링크 (M8.1)
+def test_paths_in_text_are_links_only_when_they_exist(tmp_path):
+    shot = tmp_path / "Screenshots" / "스크린샷 2026-11-11 140548.png"
+    shot.parent.mkdir()
+    shot.write_bytes(b"x")
+    data = tmp_path / "eeg.json"
+    data.write_text("{}", encoding="utf-8")
+    found = lambda line: [p for _, _, p in tui._paths(line)]
+    assert found(f"출처: {shot}, {data}") == [str(shot), str(data)]          # 띄어쓰기가 든 경로도 끝까지
+    assert found(f"$ powershell -Command \"Get-Content '{data}' | ConvertFrom-Json\"") == [str(data)]
+    assert found(f"{tmp_path}에는 없습니다.") == [str(tmp_path)]               # 한글 조사는 뗀다
+    assert found(f"({data}).") == [str(data)]
+    assert found(f"{tmp_path}/없는파일.txt and https://a.org/x/y") == []     # 없는 경로·주소 속 / 는 아님
+    text = tui.linkify(tui.Text(f"출처: {data}"))
+    assert [s.style.link for s in text.spans] == [str(data)]
+
+
+def test_ctrl_click_opens_a_path(tmp_path):
+    data = tmp_path / "eeg.json"
+    data.write_text("{}", encoding="utf-8")
+    app = answered(tmp_path, f"Channels: 64. File: {data}")
+    opened = []
+    app.open_path = lambda path: opened.append(path) or "opened"
+
+    async def go():
+        async with app.run_test(size=(160, 36)) as pilot:
+            await send(pilot, "hello")
+            await until(pilot, lambda: not app.job and app.engine.memory.turns)
+            body = app.query(TaskCard).last().body
+            line = body.plain().split("\n")[1]
+            await press(pilot, body, (line.index("eeg.json"), 1), ctrl=True)
+            assert opened == [str(data)]
+            await press(pilot, body, (line.index("Channels"), 1), ctrl=True)    # 경로가 아닌 곳
+            assert opened == [str(data)]
+    run(go())
+    app.engine.close()
+
+
+def test_opening_paths_never_runs_programs(tmp_path, monkeypatch):
+    from glados import opener
+
+    did = []
+    monkeypatch.setattr(opener, "_open", lambda p, os_name: did.append(("open", p.name)))
+    monkeypatch.setattr(opener, "_reveal", lambda p, os_name: did.append(("reveal", p.name)))
+    (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "setup.exe").write_bytes(b"MZ")
+    (tmp_path / "run.ps1").write_text("echo", encoding="utf-8")
+    assert opener.open_path(str(tmp_path / "a.json"), "windows") == "opened"
+    assert opener.open_path(str(tmp_path), "windows") == "opened"
+    assert opener.open_path(str(tmp_path / "setup.exe"), "windows") == "revealed"   # 실행 파일은 폴더에서 보여 주기만
+    assert opener.open_path(str(tmp_path / "run.ps1"), "windows") == "revealed"
+    assert opener.open_path(str(tmp_path / "없음.txt"), "windows") == "missing"
+    assert did == [("open", "a.json"), ("open", tmp_path.name), ("reveal", "setup.exe"), ("reveal", "run.ps1")]

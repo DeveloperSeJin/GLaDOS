@@ -16,6 +16,15 @@
 - 엔진 연결은 줄 화면과 같은 cli.App (같은 ask_task, /명령, !명령). 작업과 !명령은 스레드에서 돌고 이벤트는 화면 스레드로
 - 승인·되돌리기는 상자. 숫자 1·2·3, ←→와 Enter, Esc 거절, 처음 자리는 거절, 뜬 직후 0.8초는 숫자·Enter를 받지 않는다
 - Esc·Ctrl+C: 지금 작업만 멈춘다 (모델 호출은 스트리밍이라 곧 끊긴다, 명령은 프로세스 트리째 끝낸다)
+- 대화처럼 (M8): 작업 카드에 "작업 · 완료 · 몇 초" 윗줄을 두지 않는다. 인사·답·되묻기는 말만 오가고, 도구를 쓰기
+  시작하면 GLaDOS의 첫 말 아래에 진행 줄 하나("진행 중 · 2단계 · 0:12" -> "완료 · 39초 · 도구 4번")가 생긴다.
+  계획 단계(영어)는 맥락의 과정에. 걸리는 시간은 머리글 상태 줄에도
+- 마우스 (M7.9, 연구원님 요청): 끌어서 고른 뒤 오른쪽 클릭 = 복사, 고른 것이 없을 때 오른쪽 클릭 = 입력 칸에 붙여넣기
+  (Windows 콘솔과 같은 방식), Ctrl+클릭 = 링크(http·https)를 브라우저로 연다. 클립보드는 운영 체제의 것
+  (clipboard.py, 안 되면 터미널 복사 OSC 52). 글 속 주소는 링크 모양(밑줄)으로 그린다
+- 경로 링크 (M8.1): 글 속의 파일·폴더 경로(C:\\..., /..., ~/...)도 실제로 있으면 밑줄 링크. Ctrl+클릭하면 폴더는 탐색기로,
+  파일은 기본 프로그램으로 연다. 실행되는 파일(exe, bat, ps1, py, ...)은 열지 않고 폴더에서 골라 보여 준다 (opener.py).
+  띄어쓰기가 든 경로는 있는 경로가 될 때까지 낱말을 이어 본다 (한글 조사가 붙어도 떼어 본다)
 - 한글 입력(IME): 입력 칸에 있을 때 터미널 커서를 글자 자리에 보이게 둔다 (Windows Terminal은 커서가 숨으면
   조합 글자를 엉뚱한 곳에 그린다, Textual #5457). 움직이는 것은 머리글 심볼 하나뿐이고, 작업·결정 대기 중에만,
   입력 칸에 글이 있으면 멈춘다. [ui] motion = false면 늘 멈춤
@@ -31,19 +40,23 @@ from datetime import datetime
 from typing import Any, Callable
 
 from rich.cells import cell_len
+from rich.style import Style
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App as TextualApp
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Offset
 from textual.screen import ModalScreen
+from textual.selection import Selection
 from textual.theme import Theme
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
 
-from glados import i18n, logo, osinfo
+import os
+
+from glados import clipboard, i18n, logo, opener, osinfo
 from glados.cli import CD, DIRECT_LINES_SHOWN, STOPS, App, Direct, Screen, _brief, _Keyed, event_lines
 from glados.core.llm import Meter
 from glados.config import Config
@@ -77,6 +90,82 @@ LIVE_EVERY = 2            # 몇 장면마다 흐른 시간·토큰을 다시 그
 LIVE_LINES = 3            # 작업 중 토큰 칸의 글 줄 수
 EGRESS_SHOWN = 6         # 오른쪽 맥락에 보여 줄 "밖으로 보낸 것" 수
 HIDE_CURSOR, SHOW_CURSOR = "\x1b[?25l", "\x1b[?25h"
+# 글 속 웹 주소 (Ctrl+클릭으로 연다). 괄호는 안에 있을 때만 (위키 주소), 끝의 문장 부호는 뺀다
+URL_RE = re.compile(r"https?://[^\s<>\"'\[\]{}`가-힣ㄱ-ㅎㅏ-ㅣ]+")   # 한글 조사가 붙어도 주소는 거기까지
+URL_TRAIL = ".,;:!?'\")]}>…"
+
+
+def _urls(line: str) -> list[tuple[int, int, str]]:
+    """줄 속 웹 주소 (시작, 끝, 주소)."""
+    out = []
+    for m in URL_RE.finditer(line):
+        url = m.group(0)
+        while url and url[-1] in URL_TRAIL and not (url[-1] == ")" and url.count("(") >= url.count(")")):
+            url = url[:-1]
+        if len(url) > len("https://"):
+            out.append((m.start(), m.start() + len(url), url))
+    return out
+
+
+def url_at(line: str, col: int) -> str | None:
+    """줄의 col번째 글자에 걸친 웹 주소."""
+    for start, end, url in _urls(line):
+        if start <= col < end:
+            return url
+    return None
+
+
+# 글 속 파일·폴더 경로 (M8.1): Windows 드라이브 경로, 절대 경로, ~ 경로. 띄어쓰기를 넘어 이어질 수 있다
+PATH_RE = re.compile(r"(?<![\w/\\:.~])(?:[A-Za-z]:[\\/]|~[\\/]|/(?=[^\s/]))[^\n\r\t\"'<>|*?,;`]*")
+PATH_TRAIL = ".:!?)]}>…"
+HANGUL_TAIL = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]+$")
+PATH_WORDS = 8               # 띄어쓰기가 든 경로: 이만큼 낱말까지 이어 본다
+_exists: dict[str, bool] = {}
+
+
+def path_exists(path: str) -> bool:
+    """있는 경로인가 (화면을 그릴 때마다 디스크를 보지 않게 기억해 둔다)."""
+    if path not in _exists:
+        if len(_exists) > 4000:
+            _exists.clear()
+        try:
+            _exists[path] = os.path.exists(os.path.expanduser(path))
+        except (OSError, ValueError):
+            _exists[path] = False
+    return _exists[path]
+
+
+def _paths(line: str) -> list[tuple[int, int, str]]:
+    """줄 속의 실제로 있는 경로 (시작, 끝, 경로). 가장 길게 이어지는 것."""
+    out = []
+    for m in PATH_RE.finditer(line):
+        span, best = m.group(0), ""
+        ends = [w.end() for w in re.finditer(r"\S+", span)][:PATH_WORDS]
+        for end in ends:
+            head = span[:end].rstrip(PATH_TRAIL)
+            for cand in (head, HANGUL_TAIL.sub("", head).rstrip(PATH_TRAIL)):
+                if len(cand) > len(best) and len(cand) > 2 and path_exists(cand):
+                    best = cand
+        if best:
+            out.append((m.start(), m.start() + len(best), best))
+    return out
+
+
+def path_at(line: str, col: int) -> str | None:
+    for start, end, path in _paths(line):
+        if start <= col < end:
+            return path
+    return None
+
+
+def linkify(text: Text) -> Text:
+    """글 속 웹 주소와 있는 경로에 링크 스타일 (밑줄 + 대상). 줄이 바뀌어도 조각마다 대상이 남아 Ctrl+클릭이 된다."""
+    plain = text.plain
+    for start, end, url in _urls(plain):
+        text.stylize(Style(link=url, underline=True), start, end)
+    for start, end, path in _paths(plain):
+        text.stylize(Style(link=path, underline=True), start, end)
+    return text
 SCOPE = re.compile(r"\(scope: (.+)\)\s*$")
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
 
@@ -186,16 +275,31 @@ class Lines(Static):
 
     def __init__(self, *lines: Text, **kw: Any):
         super().__init__(**kw)
-        self.lines: list[Text] = list(lines)
+        self.lines: list[Text] = [linkify(line) for line in lines]
         if self.lines:
             self.update(Text("\n").join(self.lines))
 
     def add(self, line: Text) -> None:
-        self.lines.append(line)
+        self.lines.append(linkify(line))
         self.update(Text("\n").join(self.lines))
 
     def plain(self) -> str:
         return "\n".join(line.plain for line in self.lines)
+
+    def set(self, index: int, line: Text) -> None:
+        """한 줄을 바꾼다 (작업 카드의 진행 줄)."""
+        self.lines[index] = linkify(line)
+        self.update(Text("\n").join(self.lines))
+
+
+class LinkLog(RichLog):
+    """과정 기록: 글 속 웹 주소를 링크로 (Ctrl+클릭)."""
+
+    def write(self, content: Any, *args: Any, **kw: Any) -> "LinkLog":
+        if isinstance(content, Text):
+            linkify(content)
+        super().write(content, *args, **kw)
+        return self
 
 
 class TaskCard(Vertical):
@@ -222,6 +326,7 @@ class TaskCard(Vertical):
         self.live = Static(classes="live")          # 작업 중에 주고받는 토큰 (답이 나오면 지움)
         self.output = Lines(classes="output")
         self.nav: NavItem | None = None
+        self.progress_at: int | None = None         # 작업 카드: 본문 속 진행 줄의 자리 (도구를 쓰기 시작하면, M8)
 
     def heading_text(self) -> Text:
         """제목 = 연구원님이 쓴 것 (요청, !명령, /명령). 이름표를 붙여 GLaDOS의 답과 구별한다 (M6.3)."""
@@ -241,6 +346,7 @@ class TaskCard(Vertical):
         self.body.display = bool(self.body.lines)
         self.live.display = False
         self.output.display = bool(self.output.lines)
+        self.kicker.display = self.kind != "task"   # 대화처럼 (M8): 작업 카드는 윗줄 없이, 일할 때만 본문의 진행 줄
         self.refresh_kicker()
 
     def elapsed(self) -> float:
@@ -261,6 +367,16 @@ class TaskCard(Vertical):
     def add(self, line: Text) -> None:
         self.body.display = True
         self.body.add(line)
+
+    def start_progress(self) -> None:
+        """도구를 쓰기 시작했다: GLaDOS의 첫 말 아래에 진행 줄 (M8)."""
+        if self.progress_at is None:
+            self.add(self.progress_text())
+            self.progress_at = len(self.body.lines) - 1
+
+    def progress_text(self) -> Text:
+        color = COBALT if self.state == "waiting" else (MUTED if self.state == "running" else FAINT)
+        return Text.assemble(("  ⋯ " if self.state in ("running", "waiting") else "  ", DIM), (self.status_text(), color))
 
     def add_output(self, line: Text) -> None:
         self.output.display = True
@@ -311,8 +427,13 @@ class TaskCard(Vertical):
             self.kicker.update(Text.assemble((label, COBALT if self.decision else WHITE), (" · ", DIM),
                                              (self.when, FAINT)))
             return
-        label = {"task": t("tui.k.task"), "command": t("tui.k.command"), "slash": t("tui.k.slash"),
-                 "info": t("tui.k.info")}[self.kind]
+        if self.kind == "task":
+            if self.progress_at is not None and self.body.is_mounted:
+                self.body.set(self.progress_at, self.progress_text())
+            if self.nav is not None and self.nav.is_mounted:
+                self.nav.refresh_item()
+            return
+        label = {"command": t("tui.k.command"), "slash": t("tui.k.slash"), "info": t("tui.k.info")}[self.kind]
         if self.kind in ("slash", "info"):
             self.kicker.update(Text(label, style=FAINT))
         else:
@@ -836,6 +957,8 @@ class GladosTUI(TextualApp):
         self.mem_stats = (0, 0)           # (기억한 작업 수, 다음 작업에 쓰는 비율 %)
         self.counts = {"done": 0, "stopped": 0, "commands": 0}
         self.closing = False
+        self._clip: Any = None                    # 클립보드 (처음 쓸 때 정한다: 화면 없이 돌면 이 프로그램 안에서만)
+        self._eat_up = 0                          # 오른쪽 클릭·Ctrl+클릭으로 처리한 누름의 뗌은 넘기지 않는다
         self.machine_text = ""
         self.screen_width = 0
         self.engine = TuiEngine(cfg, self, llm=llm, os_name=os_name)
@@ -879,7 +1002,7 @@ class GladosTUI(TextualApp):
                 yield Static(id="machine-title", classes="label")
                 yield Static(id="machine-info", classes="section")
                 yield Static(id="activity-title", classes="label")
-                log = RichLog(id="activity", wrap=True, markup=False, highlight=False, max_lines=600, min_width=10)
+                log = LinkLog(id="activity", wrap=True, markup=False, highlight=False, max_lines=600, min_width=10)
                 log.can_focus = False
                 yield log
                 yield Static(id="scope-title", classes="label")
@@ -1123,8 +1246,10 @@ class GladosTUI(TextualApp):
                 first = (str(d.get("text", "")).splitlines() or [""])[0]
                 card.add(Text("  " + first, style=FAINT))      # "$ 명령" (제안 줄은 맥락의 과정에만)
             for style, text in event_lines(e):
-                if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.PLAN, ev.EGRESS) and side):
+                if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.EGRESS) and side):
                     continue
+                if e.kind == ev.PLAN and side and not d.get("say"):
+                    continue                              # 계획 단계는 맥락에만. 카드에는 GLaDOS의 첫 말 (M8)
                 if style == "speaker":                    # GLaDOS의 답 앞: 코발트 점 + 이름 (연구원님 말과 구별)
                     card.add(Text.assemble(("● ", COBALT), (text, FAINT)))
                     continue
@@ -1133,6 +1258,7 @@ class GladosTUI(TextualApp):
                 card.step = int(d.get("step") or card.step)
             if e.kind == ev.PROPOSAL:
                 card.tools += 1
+                card.start_progress()                     # 일을 시작했다: 진행 줄 (M8)
             if e.kind == ev.OBSERVATION and d.get("tool") in ("fs.search", "fs.inspect"):
                 found = SCOPE.search((str(d.get("text", "")).splitlines() or [""])[0])
                 if found:
@@ -1171,9 +1297,14 @@ class GladosTUI(TextualApp):
             req = str(d.get("request", "")).replace("\n", " ")
             log.write(Text.assemble((f"{when} ", FAINT), (req[:80] + ("..." if len(req) > 80 else ""), f"bold {WHITE}")))
         elif e.kind == ev.PLAN:
-            log.write(Text(t("tui.plan"), style=FAINT))
+            goal = str(d.get("goal") or "")
+            if d.get("say"):
+                log.write(Text(f"   \u201c{d['say']}\u201d", style=MUTED))       # 연구원님께 한 첫 말
+            log.write(Text(t("tui.plan") + (f" · {goal}" if goal else ""), style=FAINT))
             for i, step in enumerate(d.get("plan") or [], 1):
                 log.write(Text(f"   {i}) {step}", style=WHITE))
+            if d.get("check"):
+                log.write(Text(f"   {t('tui.plan_check')}: {d['check']}", style=MUTED))
         elif e.kind == ev.THOUGHT:
             thought = str(d.get("thought", "")).replace("\n", " ")
             if len(thought) > THOUGHT_SHOWN:
@@ -1300,7 +1431,7 @@ class GladosTUI(TextualApp):
             text.append(src, style=WHITE)
         if len(sources) > len(shown):
             text.append(f"\n+{len(sources) - len(shown)}", style=FAINT)
-        self.query_one("#sources", Static).update(text)
+        self.query_one("#sources", Static).update(linkify(text))
         sent = card.egress if card is not None and not at_home else []
         for wid in ("#egress-title", "#egress"):
             self.query_one(wid).display = bool(sent)
@@ -1348,6 +1479,94 @@ class GladosTUI(TextualApp):
 
     def action_help(self) -> None:
         self.run_command("/help")
+
+    # ------------------------------------------------------------------ 마우스: 복사·붙여넣기·링크 (M7.9)
+    @property
+    def clip(self) -> Any:
+        if self._clip is None:
+            self._clip = clipboard.MemoryClipboard() if self.is_headless else clipboard.SystemClipboard(self.engine.os)
+        return self._clip
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """운영 체제의 클립보드에 (Ctrl+C·오른쪽 클릭). 안 되면 터미널 복사(OSC 52)."""
+        if self.clip.copy(text):
+            self._clipboard = text
+        else:
+            super().copy_to_clipboard(text)
+
+    async def on_event(self, event: events.Event) -> None:
+        if isinstance(event, events.MouseDown) and not event.is_forwarded:
+            if event.button == 3:
+                self._eat_up = 3
+                self.right_click()
+                return
+            if event.button == 1 and event.ctrl:
+                url = self.link_at(*event.screen_offset)
+                if url:
+                    self._eat_up = 1
+                    self.open_link(url)
+                    return
+        if isinstance(event, events.MouseUp) and not event.is_forwarded and self._eat_up:
+            self._eat_up = 0
+            return
+        await super().on_event(event)
+
+    def right_click(self) -> None:
+        """고른 글이 있으면 복사, 없으면 입력 칸에 붙여넣기 (Windows 콘솔과 같은 방식)."""
+        chosen = self.screen.get_selected_text()
+        if chosen:
+            self.copy_to_clipboard(chosen)
+            self.screen.clear_selection()
+            self.notify(t("tui.copied", n=len(chosen)), timeout=2)
+            return
+        if isinstance(self.screen, ModalScreen):
+            return                                # 승인 상자 중에는 붙여넣지 않는다
+        text = self.clip.paste()
+        if not text:
+            self.notify(t("tui.paste_empty"), timeout=2)
+            return
+        box = self.query_one(ChatInput)
+        box.focus()
+        box.post_message(events.Paste(text))      # 여러 줄은 입력 칸이 표시로 넣는다 (터미널 붙여넣기와 같은 길)
+
+    def link_at(self, x: int, y: int) -> str | None:
+        """화면 (x, y)의 웹 주소나 경로: 링크 스타일이 있으면 그것, 없으면 그 자리 글에서 찾는다."""
+        try:
+            link = self.screen.get_style_at(x, y).link
+        except Exception:                         # 화면 밖, 그리는 중
+            link = None
+        if link and (URL_RE.fullmatch(link) or path_exists(link)):
+            return link
+        try:
+            widget, offset = self.screen.get_widget_and_offset_at(x, y)
+        except Exception:
+            return None
+        if widget is None or offset is None:
+            return None
+        if isinstance(widget, Lines):
+            text = widget.plain()
+        elif isinstance(widget, Input):
+            text = widget.value
+        else:
+            got = widget.get_selection(Selection(None, None))
+            text = got[0] if got else ""
+        lines = text.split("\n")
+        if not 0 <= offset.y < len(lines):
+            return None
+        return url_at(lines[offset.y], offset.x) or path_at(lines[offset.y], offset.x)
+
+    def open_link(self, target: str) -> None:
+        """웹 주소는 브라우저로, 경로는 탐색기·기본 프로그램으로 (실행 파일은 폴더에서 보여 주기만, M8.1)."""
+        short = target if len(target) <= 80 else "…" + target[-79:]
+        if URL_RE.fullmatch(target):
+            self.notify(t("tui.link_open", url=short), timeout=2)
+            self.open_url(target)
+            return
+        done = self.open_path(target)
+        self.notify(t(f"tui.path_{done}", path=short), timeout=3)
+
+    def open_path(self, path: str) -> str:
+        return opener.open_path(path, self.engine.os)
 
     # ------------------------------------------------------------------ 존재감 (머리글 심볼)
     def set_presence(self, kind: str) -> None:

@@ -88,6 +88,7 @@ class HandContext:
     resume_to: str = ""
     notes: Any = None                            # memory.notes.Notes (MEMORY.md). 없으면 memory.note 없음
     embedder: Any = None                         # core.llm.Embedder: 뜻으로 찾기의 질문 벡터 (M7.2). 없으면 낱말로만
+    cloud: bool = False                          # 클라우드에만 있는 파일도 내려받아 읽나 ([index] cloud, M7.5)
 
 
 class ToolRegistry:

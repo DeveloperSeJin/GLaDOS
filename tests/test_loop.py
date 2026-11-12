@@ -62,20 +62,19 @@ def test_tool_then_answer():
     assert calls == [{"path": "/tmp/a.txt"}]
     second_messages = llm.calls[1][0]
     assert second_messages[-1]["content"].startswith("[result: fs.read] content")
-    assert llm.calls[0][1]["properties"]["action"]["anyOf"][0]["properties"]["tool"]["enum"] == ["fs.read"]
+    assert llm.calls[1][1]["properties"]["action"]["anyOf"][0]["properties"]["tool"]["enum"] == ["fs.read"]
+    assert llm.calls[0][1]["required"][:2] == ["goal", "next"]          # 첫 호출은 계획 (M7.7)
 
 
-def test_first_step_writes_a_plan_when_tools_exist():
-    """질문을 받으면 어떻게 할지 모델이 먼저 생각한다 (M2.7): 첫 걸음의 스키마가 계획을 요구한다."""
+def test_step_shaped_planning_reply_is_the_first_step():
+    """계획 호출에 걸음 모양으로 답하면 (계획을 건너뛴 답) 그 걸음을 첫 걸음으로 쓴다. 그 걸음의 plan도 보인다 (M2.7)."""
     from glados.cli import event_lines
 
     plan = ["Read the file.", "Answer from what it says."]
     llm = FakeLLM([{**act("fs.read", path="/tmp/a.txt"), "plan": plan}, answer()])
     result, events = run(llm, tools=ToolRegistry([reader()]))
-    first, second = llm.calls[0][1], llm.calls[1][1]
-    assert first["required"] == ["plan", "thought", "action", "done"] and list(first["properties"])[0] == "plan"
-    assert first["properties"]["plan"]["minItems"] == 1 and first["properties"]["plan"]["maxItems"] == 6
-    assert second["required"] == ["thought", "action", "done"]         # 뒤 걸음은 바꿀 때만. action은 늘 (없으면 null)
+    assert result.status == "done" and result.steps == 2 and len(llm.calls) == 2
+    assert llm.calls[1][1]["required"] == ["thought", "action", "done"]   # 뒤 걸음은 바꿀 때만. action은 늘 (없으면 null)
     planned = [e for e in events if e.kind == ev.PLAN]
     assert len(planned) == 1 and planned[0].data == {"step": 1, "plan": plan}
     assert event_lines(planned[0]) == [("dim", "계획"), ("dim", "  1. Read the file."),
@@ -124,7 +123,7 @@ def test_same_call_three_times_stops():
     llm = FakeLLM([act("fs.read", path="/tmp/a.txt")] * 3)
     result, _ = run(llm, tools=ToolRegistry([reader(calls)]))
     assert result.reason == "same_call"
-    assert len(calls) == 2            # 세 번째는 실행하지 않음
+    assert len(calls) == 1            # 두 번째부터는 실행하지 않음 (M7.5: 같은 찾기·읽기는 다시 돌리지 않는다)
 
 
 # ---------------------------------------------------------------- 작은 모델을 위한 안전망

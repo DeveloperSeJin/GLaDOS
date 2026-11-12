@@ -151,7 +151,7 @@ def test_prompt_lists_three_recent_conversations_rule_and_marks_examples(tmp_pat
         assert '"what is two plus two" (1 task)' in listed and "ablation" not in listed      # 넷째는 빠진다
         assert '"' + "x" * 59 + '…"' in listed                                      # 긴 제목은 줄임
         assert 'Earlier work not in this conversation ("아까", "어제", "이어서"): call session.resume first.' in prompt
-        assert "- Example only, not a request in this conversation (plan, then the first step" in prompt
+        assert "- Example only, not a request in this conversation (the first step after the plan)" in prompt
         assert "- Example only, not a request in this conversation:\nResearcher: LLM" in prompt
         assert "{example}" not in prompt
     finally:
@@ -367,9 +367,9 @@ def test_plain_start_mentions_the_last_conversation(tmp_path, monkeypatch):
         b.close()
 
 
-@pytest.mark.parametrize("num_ctx", [16384])
-def test_prompt_budget_at_16k_with_notes(tmp_path, num_ctx):
-    """16k에서 메모가 가득 차도 지난 대화 몫이 남는다."""
+@pytest.mark.parametrize("num_ctx", [32768])
+def test_prompt_budget_at_32k_with_notes(tmp_path, num_ctx):
+    """32k(M7.4부터 집 컴퓨터 설정)에서 메모가 가득 차도 지난 대화 몫이 넉넉히 남는다."""
     home = tmp_path / "home"
     ensure_home(home)
     (home / "servers.toml").write_text('[[server]]\nalias = "server-a"\nworkdir = "/home/gildong/work"\n', encoding="utf-8")
@@ -381,6 +381,6 @@ def test_prompt_budget_at_16k_with_notes(tmp_path, num_ctx):
         for i in range(30):
             a.notes.add(f"note {i}: keep the batch size at 32 for the resnet runs")
         full = a.history_budget()
-        assert empty >= 2550 and 0 < empty - full <= 650 and full > 1900
+        assert empty >= 20000 and 0 < empty - full <= 2500 and full > 18000     # M8.3 실험 규칙까지 넣은 크기 (16k는 이제 쓰지 않음)
     finally:
         a.close()

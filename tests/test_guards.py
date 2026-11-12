@@ -54,23 +54,14 @@ def run(llm, request, tools=None, reply_lang="en", memory=None):
 
 
 def test_non_english_answer_is_sent_back_once():
-    llm = FakeLLM([act("fs.search", query="paper"), answer("파일이 없습니다. 조건을放宽해 보겠습니다."),
-                   answer("There is no paper in Downloads.")])
-    result, events = run(llm, "Find the paper in my Downloads")
-    assert result.answer.fact == "There is no paper in Downloads." and result.steps == 3
+    """M8.3 연구원님 "그냥 전부 영어로": 영어가 아닌 답은 한 번 되돌린다. 화면에는 번역해서."""
+    llm = FakeLLM([act("fs.search", query="paper"), answer("다운로드에 논문이 없습니다."),
+                   answer("There is no paper in Downloads."), translation("다운로드에 논문이 없습니다.")])
+    result, events = run(llm, "다운로드에서 논문 찾아줘", reply_lang="ko")
+    assert result.answer.fact == "다운로드에 논문이 없습니다." and result.internal.fact == "There is no paper in Downloads."
     assert [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.english"]
     assert llm.calls[2][0][-1]["content"] == NUDGE_ENGLISH
-    assert not any("파일이 없습니다" in m["content"] for m in result.transcript)   # 되돌린 답은 기억 안 함
-
-
-def test_english_check_fires_once_then_accepts():
-    llm = FakeLLM([act("fs.search", query="x"), answer("한국어로 답합니다."), answer("여전히 한국어입니다."),
-                   translation("It is still Korean.")])
-    result, events = run(llm, "Find x", reply_lang="ko")
-    assert result.status == "done" and result.answer.fact == "여전히 한국어입니다."     # 이미 한국어라 화면용 번역 없음
-    assert result.internal.fact == "It is still Korean."                          # 비교·기억용으로만 영어로 옮김
-    assert sum(e.kind == ev.GUARD for e in events) == 1
-    assert len(llm.calls) == 4
+    assert not any("다운로드에 논문이 없습니다" in m["content"] for m in result.transcript)   # 되돌린 답은 기억 안 함
 
 
 def test_promise_then_action():
@@ -85,7 +76,8 @@ def test_promise_then_action():
     assert result.answer.fact.startswith("Downloads has") and [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.promise"]
 
 
-def test_answer_is_translated_and_memory_keeps_english():
+def test_answer_in_another_language_is_translated_as_a_fallback():
+    """연구원님의 언어로 쓰지 않은 답만 옮긴다 (M8). 기억에는 모델이 쓴 그대로."""
     llm = FakeLLM([
         act("fs.search", query="paper"),
         answer("Found one paper: 학위논문.pdf.", "Small sample. Still a sample.", ["/d/학위논문.pdf"]),
@@ -203,24 +195,18 @@ def test_sources_are_capped_on_screen(tmp_path):
     a.close()
 
 
-def test_stubborn_non_english_answer_is_compared_in_english():
-    """영어로 다시 쓰라고 해도 한국어로 답하면, 번역기로 영어로 옮겨 안전망이 비교한다."""
-    llm = FakeLLM([
-        act("fs.search", query="x"),
-        answer("조건을 넓혀 보겠습니다."), answer("조건을 넓혀서 보겠습니다."),          # 영어 확인 1번, 그래도 한국어
-        translation("I'll try a broader search."),                               # 영어로 옮겨 비교 -> 약속만 함
-        act("fs.search", query="paper"),
-        answer("There is no paper in Downloads."), translation("다운로드에 논문이 없습니다."),
-    ])
+def test_stubborn_non_english_answer_is_taken_as_written():
+    """두 번째도 영어가 아니면 그대로 받는다 (옮기는 호출 없이). 낱말 안전망은 영어 답에만."""
+    llm = FakeLLM([act("fs.search", query="x"), answer("조건을 넓혀 보겠습니다."), answer("다운로드에는 없습니다.")])
     result, events = run(llm, "논문 찾아줘", reply_lang="ko")
-    assert [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.english", "guard.promise"]
-    assert result.answer.fact == "다운로드에 논문이 없습니다." and result.internal.fact == "There is no paper in Downloads."
+    assert result.answer.fact == "다운로드에는 없습니다." and len(llm.calls) == 3
+    assert [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.english"]
 
 
-def test_english_request_answered_in_korean_is_shown_in_english():
-    llm = FakeLLM([answer("안녕하세요."), answer("안녕하세요, 연구원님."), translation("Hello, Researcher.")])
+def test_english_request_answered_in_korean_is_sent_back():
+    llm = FakeLLM([answer("안녕하세요, 연구원님."), answer("Hello, Researcher.")])
     result, _ = run(llm, "Hello there", tools=ToolRegistry(), reply_lang="en")
-    assert result.answer.fact == "Hello, Researcher." and result.internal.fact == "Hello, Researcher."
+    assert result.answer.fact == "Hello, Researcher." and len(llm.calls) == 2
 
 
 def test_needs_evidence_covers_information_that_changes():

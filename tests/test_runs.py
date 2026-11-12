@@ -215,7 +215,7 @@ def test_restart_catches_up_and_cancels_old_queue(srv, tmp_path):
     r2, _, notices, _ = make_runner(srv, tmp_path, clock=Clock(time.time() + 5), store=store)   # 다시 켬
     r2.expire_waiting()
     r2.tick()
-    kinds = {n.kind: n for n in notices}
+    kinds = {n.kind: n for n in notices if n.kind != "budget"}       # 오후에는 하루 GPU 시간 알림도 (가짜 시작 시각 탓)
     assert set(kinds) == {"expired", "done"}
     assert "GLaDOS가 꺼져 있는 동안 끝났습니다" in kinds["done"].lines()[-1]
     assert store.get("EXP-02").state == "cancelled" and store.get("EXP-01").state == "done"

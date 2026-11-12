@@ -149,6 +149,11 @@ def event_lines(e: Event) -> list[tuple[str, str]]:
         out.extend(("dim", "  " + line) for line in lines[:SHELL_LINES_SHOWN])
         if len(lines) > SHELL_LINES_SHOWN:
             out.append(("dim", "  ..."))
+    elif e.kind == ev.PLAN and d.get("say"):
+        out.append(("speaker", t("speaker.glados")))             # 대화 차례의 첫 말 (M8). 계획 단계는 맥락 패널에
+        out.append(("plain", d["say"]))
+        if d.get("untranslated"):
+            out.append(("dim", t("render.untranslated")))
     elif e.kind == ev.PLAN:
         out.append(("dim", t("render.plan")))
         out.extend(("dim", f"  {i}. {step}") for i, step in enumerate(d.get("plan") or [], 1))
@@ -225,6 +230,7 @@ class App:
             notes=Notes(cfg.home, cfg.language),                                # MEMORY.md (M6): "기억해"
             embedder=(Embedder(cfg.model.host, cfg.index.embed_model)            # 뜻으로 찾기 (M7.2): 질문 벡터
                       if cfg.index.enabled and cfg.index.embed_model else None),
+            cloud=cfg.index.cloud,                                              # 클라우드 파일도 읽기 (M7.5)
         )
         self.translator = Translator(self.llm, keep=[s.alias for s in cfg.servers])   # 영어 답 -> 연구원님의 언어 (서버 이름은 그대로)
         self.tools = load_hands(self.os, self.hctx)
@@ -254,8 +260,12 @@ class App:
             return
         if roots:
             try:
+                m = self.cfg.model
+                vision = {"name": m.name, "num_ctx": m.num_ctx, "keep_alive": m.keep_alive} if self.cfg.index.ocr else {}
                 self.indexer = content_index.IndexProcess(self.cfg.home, [str(r) for r in roots], self.places,
-                                                          host=self.cfg.model.host, embed_model=self.cfg.index.embed_model)
+                                                          host=m.host, embed_model=self.cfg.index.embed_model,
+                                                          cloud=self.cfg.index.cloud, vision=vision,
+                                                          first=fs_hands.user_places(self.hctx))
             except OSError:
                 self.indexer = None
 
@@ -275,8 +285,9 @@ class App:
             idx.close()
         by = st["by_status"]
         ok, scanned, locked = by.get("ok", 0), by.get("no_text", 0), by.get("locked", 0)
-        lines = [t("index.head", files=st["files"], ok=ok, scanned=scanned, locked=locked,
-                   failed=st["files"] - ok - scanned - locked)]
+        names = sum(by.get(k, 0) for k in ("name", "image", "pending", "cloud"))
+        lines = [t("index.head", files=st["files"], ok=ok, scanned=scanned, locked=locked, names=names,
+                   failed=st["files"] - ok - scanned - locked - names)]
         state = st.get("state", "")
         if not running:
             lines.append(t("index.stopped"))
@@ -284,6 +295,8 @@ class App:
             lines.append(t("index.reading", done=st.get("pass_done", 0), total=st.get("pass_total", 0)))
         elif state == "walking":
             lines.append(t("index.walking"))
+        elif state == "listing":
+            lines.append(t("index.listing", done=st.get("pass_done", 0), total=st.get("pass_total", 0)))
         if state in ("idle", "stopped") or not running:
             try:
                 when = datetime.fromtimestamp(float(st.get("pass_finished") or 0))
@@ -294,6 +307,7 @@ class App:
         if st["partial"]:
             lines.append(t("index.partial", count=st["partial"]))
         lines += self.meaning_lines(st)
+        lines += self.ocr_lines(st)
         try:
             folders = ", ".join(json.loads(st.get("roots") or "[]"))
         except ValueError:
@@ -308,6 +322,21 @@ class App:
         lines.append(t("index.file", path=path, size=fs_hands._fmt_size(size)))
         if st.get("last_error"):
             lines.append(t("index.error", detail=st["last_error"]))
+        return lines
+
+    def ocr_lines(self, st: dict) -> list[str]:
+        """/index의 사진·스캔 줄 (M7.5)."""
+        if not self.cfg.index.ocr:
+            return [t("index.ocr_off")]
+        done, left = st.get("ocr_done", 0), st.get("ocr_left", 0)
+        state = st.get("ocr_state", "")
+        if state == "missing" and left:
+            return [t("index.ocr_missing", model=self.cfg.model.name)]
+        lines = [t("index.ocr", done=done, left=left)]
+        if state == "waiting" and left:
+            lines.append(t("index.meaning_waiting"))
+        elif state == "error" and st.get("ocr_error"):
+            lines.append(t("index.error", detail=st["ocr_error"]))
         return lines
 
     def meaning_lines(self, st: dict) -> list[str]:
@@ -328,6 +357,56 @@ class App:
             lines.append(t("index.error", detail=st["embed_error"]))
         return lines
 
+    def planning_facts(self) -> str:
+        """계획할 때 모델이 볼 이 컴퓨터의 지금 사실 (M7.7, 영어). 판단은 넣지 않고 사실만:
+        찾기 범위(드라이브, 구글 드라이브인지), 연구원님 자료가 있을 곳, 내용 색인이 어디까지 됐는지."""
+        lines: list[str] = []
+        try:
+            roots, _ = fs_hands._resolve_roots(list(self.cfg.search_default) or ["~"], self.hctx)
+        except ToolError:
+            roots = []
+        if roots:
+            named = []
+            for r in roots[:12]:
+                google = any(os.path.exists(os.path.join(str(r), m)) for m in content_index.GOOGLE_MARKS)
+                named.append(f"{r} (Google Drive)" if google else str(r))
+            lines.append("fs.search with roots left out searches: " + ", ".join(named))
+        try:
+            places = fs_hands.user_places(self.hctx)
+        except (ToolError, OSError):
+            places = []
+        if places:
+            lines.append("The Researcher's own folders and drives: " + ", ".join(places[:10]))
+        lines += self._index_facts()
+        return "\n".join(f"- {line}" for line in lines)
+
+    def _index_facts(self) -> list[str]:
+        if not self.cfg.index.enabled or not content_index.fts5_ok():
+            return ["There is no background index: content searches over big folders read files on the spot (slow)."]
+        idx = content_index.open_index(self.cfg.home)
+        if idx is None:
+            return ["The background index has not been built yet: big searches walk folders on the spot (slow)."]
+        try:
+            st = idx.stats()
+        except sqlite3.Error:
+            return []
+        finally:
+            idx.close()
+        by = st["by_status"]
+        listed = "the file list is complete" if st.get("catalog_finished") else "the file list is still being built"
+        out = [f"Background index: {st['files']} files known by name ({listed}); text of {by.get('ok', 0)} "
+               "documents can be searched with content=true."]
+        if self.cfg.index.ocr:
+            left = st.get("ocr_left", 0)
+            out.append(f"Photos and scans already looked at (findable by what they show and their text): "
+                       f"{st.get('ocr_done', 0)}; not yet: {left}" + (" (findable by name only; fs.inspect can look "
+                                                                       "at them)" if left else "") + ".")
+        model = self.cfg.index.embed_model
+        if model:
+            vec = st.get("vectors", {})
+            out.append(f"Search by meaning is ready for {vec.get(model, 0)} of {sum(vec.values())} documents.")
+        return out
+
     def system_prompt(self) -> str:
         """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록)."""
         names = self.tools.names()
@@ -340,6 +419,7 @@ class App:
             runs=self.runner.summary_line() if self.runner is not None else "",
             notes=self.notes.prompt(notes_budget(self.cfg.model.num_ctx)),
             earlier=self.earlier_sessions_line(),
+            experiments=str(Path(self.workspace()) / "experiments") if "shell.run" in names else "",
         )
 
     def earlier_sessions_line(self) -> str:
@@ -466,6 +546,8 @@ class App:
                 translator=self.translator,
                 reply_lang=lang,
                 cancelled=cancelled,
+                plan_first=self.cfg.limits.plan_first,
+                situation=self.planning_facts() if self.cfg.limits.plan_first else "",
             )
         except Cancelled:                                # 보통은 루프가 받아 멈춤으로 돌려준다
             self._abort(task_id, "user", t("stop.user", "en"), t("stop.user"))
