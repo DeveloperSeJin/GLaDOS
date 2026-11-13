@@ -8,7 +8,8 @@ from datetime import datetime
 
 import pytest
 
-from conftest import FakeLLM, act, answer, make_places
+from conftest import FakeLLM, act, answer, make_places, verdict
+from glados.core.checker import Checker
 from glados import cli, osinfo
 from glados.config import ensure_home, load_config
 from glados.core.context import FULL
@@ -111,15 +112,18 @@ def test_made_up_answer_is_sent_back(app):
         act("fs.search", query="paper", kind="pdf"),
         answer("Found 2 PDFs.", "", [PAPER]),
         translation("PDF 2개를 찾았습니다."),
-        answer("There are 0 PDF files in Downloads."),                     # 출처 없이 단정 -> 되돌림
+        answer("There are 0 PDF files in Downloads."),                     # 근거 없이 단정 -> 답 점검이 되돌림
+        verdict(claims_supported="The earlier search found 2 PDFs; nothing was read."),
         act("fs.read", path=PAPER),
         answer("The thesis is about turning EEG into sentences.", "", [PAPER]),
+        verdict(),
         translation("학위논문은 뇌파로 문장을 만드는 연구입니다."),
     ]
     a.ask_task("다운로드 폴더에서 논문 하나 찾아줘")
+    a.checker = Checker(a.llm)                                             # 답 점검 (M9.3)
     a.ask_task("찾은 PDF 하나 읽고 요약해줘")
     text = out.getvalue()
-    assert "확인하지 않은 답이라 다시 확인하게 했습니다" in text and "0 PDF" not in text
+    assert "답을 점검해 고치게 했습니다 (근거)" in text and "0 PDF" not in text
     remembered = a.memory.turns[-1].messages
     assert not any("0 PDF" in m["content"] for m in remembered)          # 되돌린 답은 기억하지 않음
     assert reads == [PAPER]

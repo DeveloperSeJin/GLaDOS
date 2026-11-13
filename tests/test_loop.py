@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import time
 
-from conftest import FakeLLM, act, answer, base_layers, make_ctx
+from conftest import FakeLLM, act, answer, base_layers, make_ctx, verdict
 from glados.config import LoopLimits
 from glados.core import events as ev
 from glados.core.llm import FormatError
-from glados.core.loop import HINT_REPEAT, NUDGE_EVIDENCE, OBS_LIMIT, run_task
+from glados.core.checker import CHECK_PROMPT, Checker
+from glados.core.loop import HINT_REPEAT, OBS_LIMIT, run_task
 from glados.hands import Tool, ToolError, ToolRegistry
 from glados.safety.policy import Policy
 
 
 def run(llm, tools=None, limits=None, approve=None, audit=None, overflow_dir=None, ctx=None,
-        evidence_check=None, request="test task"):
+        check=False, request="test task"):
     tools = tools or ToolRegistry()
     events = []
     ctx = ctx or make_ctx("linux", registered_tools=frozenset(tools.names()))
@@ -31,7 +32,7 @@ def run(llm, tools=None, limits=None, approve=None, audit=None, overflow_dir=Non
         audit=audit,
         overflow_dir=overflow_dir,
         task_id="T1",
-        evidence_check=evidence_check,
+        checker=Checker(llm) if check else None,
     )
     return result, events
 
@@ -74,7 +75,7 @@ def test_step_shaped_planning_reply_is_the_first_step():
     llm = FakeLLM([{**act("fs.read", path="/tmp/a.txt"), "plan": plan}, answer()])
     result, events = run(llm, tools=ToolRegistry([reader()]))
     assert result.status == "done" and result.steps == 2 and len(llm.calls) == 2
-    assert llm.calls[1][1]["required"] == ["thought", "action", "done"]   # 뒤 걸음은 바꿀 때만. action은 늘 (없으면 null)
+    assert llm.calls[1][1]["required"] == ["progress", "thought", "action", "done"]   # 뒤 걸음은 바꿀 때만. action은 늘 (없으면 null)
     planned = [e for e in events if e.kind == ev.PLAN]
     assert len(planned) == 1 and planned[0].data == {"step": 1, "plan": plan}
     assert event_lines(planned[0]) == [("dim", "계획"), ("dim", "  1. Read the file."),
@@ -156,43 +157,60 @@ def test_tool_errors_final_report_sees_the_error():
     assert report_messages[-2]["content"] == "[result: fs.read] Error: No such file: /tmp/b"   # 마지막 오류를 보고 답함
 
 
-def test_file_answer_without_tools_is_sent_back_once():
+# ---------------------------------------------------------------------- 답 점검 (M9.3)
+def test_answer_check_sends_back_an_unbacked_answer_and_keeps_it_in_the_task():
+    """smolagents final_answer_checks처럼: 걸린 답과 점검 결과는 이번 작업의 대화에 남기고 계속한다.
+    화면·기억에는 남기지 않는다. 점검은 같은 대화 뒤에 질문을 붙인다 (Magentic-One 진행 장부처럼 reason/answer)."""
     llm = FakeLLM([
         answer("There are 0 PDF files in Downloads."),             # 확인 없이 지어낸 답
+        verdict(claims_supported="No tool result shows the Downloads folder."),
         act("fs.read", path="/tmp/학위논문.pdf"),
         answer("The thesis is about turning EEG into text.", "", ["/tmp/학위논문.pdf"]),
+        verdict(),
     ])
-    seen = []
-    result, events = run(llm, tools=ToolRegistry([reader()]), evidence_check=lambda text: seen.append(text) or True,
-                         request="찾은 PDF 하나 읽고 요약해줘")
+    result, events = run(llm, tools=ToolRegistry([reader()]), check=True, request="찾은 PDF 하나 읽고 요약해줘")
     assert result.status == "done" and result.steps == 3 and result.answer.fact.startswith("The thesis")
-    assert llm.calls[1][0][-1]["content"] == NUDGE_EVIDENCE
-    assert seen[0] == "찾은 PDF 하나 읽고 요약해줘\nAnswer now.\nThere are 0 PDF files in Downloads. "   # 요청 + 영어 생각과 답
+    asked, schema = llm.calls[1]
+    assert asked[-1]["content"].startswith("[check] Before your draft answer above")
+    assert "찾은 PDF 하나 읽고 요약해줘" in asked[-1]["content"] and "0 PDF files" in asked[-2]["content"]
+    assert schema["required"] == ["answers_request", "claims_supported", "results_plausible"]
+    retry = llm.calls[2][0]
+    assert "0 PDF files" in retry[-2]["content"]                                   # 걸린 답은 대화에 남는다
+    assert retry[-1]["content"].startswith("[check] Your draft was not given to the Researcher.")
+    assert "- claims_supported: No tool result shows the Downloads folder." in retry[-1]["content"]
+    assert [e.data["passed"] for e in events if e.kind == ev.CHECK] == [False, True]
     guards = [e for e in events if e.kind == ev.GUARD]
-    assert len(guards) == 1
+    assert len(guards) == 1 and guards[0].data["params"] == {"what": "근거"}
     assert not any(e.kind == ev.ANSWER and "0 PDF" in e.data["fact"] for e in events)   # 지어낸 답은 화면에 안 나감
+    assert not any("0 PDF" in m["content"] or "[check]" in m["content"] for m in result.transcript)
 
 
-def test_evidence_nudge_only_once():
-    llm = FakeLLM([answer("There is none."), answer("There really is none.")])
-    result, events = run(llm, tools=ToolRegistry([reader()]), evidence_check=lambda r: True)
-    assert result.status == "done" and result.answer.fact == "There really is none."
-    assert sum(e.kind == ev.GUARD for e in events) == 1
+def test_answer_check_sends_back_at_most_check_answers_times():
+    llm = FakeLLM([answer("There is none."), verdict(answers_request="It only says what it will do."),
+                   answer("There really is none.")])
+    result, events = run(llm, tools=ToolRegistry([reader()]), check=True, limits=LoopLimits(check_answers=1))
+    assert result.status == "done" and result.answer.fact == "There really is none." and len(llm.calls) == 3
+    assert sum(e.kind == ev.CHECK for e in events) == 1 and sum(e.kind == ev.GUARD for e in events) == 1
 
 
-def test_no_nudge_for_plain_questions_or_after_tools():
-    llm = FakeLLM([answer("Hello, Researcher.")])
-    result, events = run(llm, tools=ToolRegistry([reader()]), evidence_check=lambda r: False)
+def test_answer_check_passes_and_a_broken_check_lets_the_answer_through():
+    llm = FakeLLM([answer("Hello, Researcher."), verdict()])
+    result, events = run(llm, tools=ToolRegistry([reader()]), check=True)
     assert result.steps == 1 and not any(e.kind == ev.GUARD for e in events)
-    llm = FakeLLM([act("fs.read", path="/tmp/a"), answer("I read it.")])
-    result, events = run(llm, tools=ToolRegistry([reader()]), evidence_check=lambda r: True)
-    assert result.steps == 2 and not any(e.kind == ev.GUARD for e in events)
-
-
-def test_no_nudge_without_tools():
+    llm = FakeLLM([answer("Hello, Researcher."), FormatError("bad", "llm.format", count=2, detail="x")])
+    result, events = run(llm, tools=ToolRegistry([reader()]), check=True)
+    assert result.answer.fact == "Hello, Researcher."
+    assert [e.data["error"] for e in events if e.kind == ev.CHECK] == ["bad"]
     llm = FakeLLM([answer("I have no file tools.")])
-    result, _ = run(llm, evidence_check=lambda r: True)
-    assert result.steps == 1
+    result, _ = run(llm, check=False)                                                # 점검 없이
+    assert result.steps == 1 and len(llm.calls) == 1
+
+
+def test_check_prompt_keeps_the_ledger_shape():
+    """Magentic-One ORCHESTRATOR_PROGRESS_LEDGER_PROMPT처럼: 질문마다 reason과 answer."""
+    text = CHECK_PROMPT.format(mark="[check]", request="r")
+    for key in ("answers_request", "claims_supported", "results_plausible"):
+        assert f'"{key}": {{"reason": string, "answer": boolean}}' in text
 
 
 def test_same_result_again_gets_hint():
@@ -400,19 +418,6 @@ def test_file_sources_are_not_checked_as_urls():
     llm = FakeLLM([act("web.search", query="x"), answer("Done.", sources=["C:\\Users\\User\\a.pdf"])])
     result, events = run(llm, tools=ToolRegistry([_search()]))
     assert result.status == "done" and not any(e.kind == ev.GUARD for e in events)
-
-
-def test_evidence_nudge_points_to_web_search_when_it_exists():
-    from glados.core.guards import needs_evidence
-    from glados.core.loop import NUDGE_WEB
-
-    llm = FakeLLM([answer("The latest version is 9."), answer("I could not check it.")])
-    result, events = run(llm, tools=ToolRegistry([_search()]), evidence_check=needs_evidence,
-                         request="What is the latest version of Textual?")
-    assert llm.calls[1][0][-1]["content"] == NUDGE_EVIDENCE + NUDGE_WEB
-    llm = FakeLLM([answer("There are 2 files."), answer("I checked nothing.")])
-    run(llm, tools=ToolRegistry([reader()]), evidence_check=needs_evidence, request="How many files?")
-    assert llm.calls[1][0][-1]["content"] == NUDGE_EVIDENCE                    # 웹 도구가 없으면 웹 안내 없이
 
 
 # ---------------------------------------------------------------------- 막혔을 때 (2026-11-11 실사용)

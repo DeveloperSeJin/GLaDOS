@@ -1089,3 +1089,41 @@ def test_opening_paths_never_runs_programs(tmp_path, monkeypatch):
     assert opener.open_path(str(tmp_path / "run.ps1"), "windows") == "revealed"
     assert opener.open_path(str(tmp_path / "없음.txt"), "windows") == "missing"
     assert did == [("open", "a.json"), ("open", tmp_path.name), ("reveal", "setup.exe"), ("reveal", "run.ps1")]
+
+
+# ---------------------------------------------------------------- 아래 붙기 (M8.3)
+def test_conversation_follows_the_bottom_unless_scrolled_up(tmp_path):
+    """연구원님: "답변 나올 때 드래그바가 제일 아래 있으면 아래를 유지". 위로 올려 읽는 중이면 그 자리 그대로."""
+    long = "\n".join(f"Line {i} of the answer." for i in range(40))
+    llm = FakeLLM([answer(long, ""), answer("Second.", "")])
+    app = make(tmp_path, llm, ToolRegistry())
+
+    async def go():
+        async with app.run_test(size=SIZE) as pilot:
+            main = app.main
+            await send(pilot, "hello")
+            await until(pilot, lambda: not app.job and len(app.engine.memory.turns) == 1)
+            await pilot.pause()
+            assert main.max_scroll_y > 0 and main.scroll_y == main.max_scroll_y      # 답이 길어도 맨 아래
+            card = app.query(TaskCard).last()
+            main.scroll_relative(y=-10, animate=False)                               # 위로 올려 읽는 중
+            await pilot.pause()
+            reading = main.scroll_y
+            for i in range(8):
+                card.add(tui.Text(f"more {i}"))
+            await pilot.pause()
+            assert main.scroll_y == reading and main.max_scroll_y > reading + 10     # 끌어내리지 않음
+            main.scroll_to(y=main.max_scroll_y, animate=False)                       # 다시 맨 아래로
+            await pilot.pause()
+            for i in range(8):
+                card.add(tui.Text(f"again {i}"))
+            await pilot.pause()
+            assert main.scroll_y == main.max_scroll_y                                # 또 따라간다
+            main.scroll_relative(y=-10, animate=False)
+            await pilot.pause()
+            await send(pilot, "next")                                                # 새로 보낸 말은 맨 아래로
+            await until(pilot, lambda: not app.job and len(app.engine.memory.turns) == 2)
+            await pilot.pause()
+            assert main.scroll_y == main.max_scroll_y
+    run(go())
+    app.engine.close()

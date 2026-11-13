@@ -30,10 +30,11 @@ from glados.core.context import (
     BRIEF, CLIPPED, DROPPED, FULL, MESSAGE_OVERHEAD, TASK_RESERVE, Conversation, Turn, limit_chars,
 )
 from glados.core.events import Event
-from glados.core.guards import DEFAULT_GUARDS, needs_evidence
+from glados.core.checker import Checker
 from glados.core.llm import Cancelled, Embedder, LLMError, OllamaClient, OllamaUnavailable
 from glados.core.loop import TaskResult, clip_output, run_task
 from glados.core.prompts import build_system_prompt, reply_note
+from glados.core.roles import Role, fill, load_roles, usable
 from glados.core.translate import Glossary, Translator, reply_language
 from glados.hands import HandContext, ToolError, load_hands
 from glados.hands import fs as fs_hands
@@ -123,6 +124,13 @@ def _brief(args: dict, limit: int = 100) -> str:
     return line if len(line) <= limit else line[:limit] + "..."
 
 
+def _guard_text(d: dict) -> str:
+    try:
+        return t(d.get("key") or "guard.check", **(d.get("params") or {}))
+    except (KeyError, IndexError):
+        return str(d.get("message", ""))
+
+
 def event_lines(e: Event) -> list[tuple[str, str]]:
     """엔진 이벤트 하나 -> 화면 줄 [(모양, 글)]. 줄 화면과 TUI가 같이 쓴다.
 
@@ -159,11 +167,16 @@ def event_lines(e: Event) -> list[tuple[str, str]]:
         out.extend(("dim", f"  {i}. {step}") for i, step in enumerate(d.get("plan") or [], 1))
     elif e.kind == ev.PROPOSAL:
         out.append(("dim", f"... {d['tool']} {_brief(d.get('args', {}))}"))
+    elif e.kind == ev.STAGE and d.get("status") in ("passed", "complete", "waiting"):
+        out.append(("dim", t(f"render.stage_{d['status']}", index=d.get("index"), total=d.get("total"),
+                             stage=d.get("stage", ""))))
+    elif e.kind == ev.ROLE:
+        out.append(("dim", t("render.role", role=d.get("role", ""), reason=str(d.get("reason", ""))[:120])))
     elif e.kind == ev.DECISION and d["verdict"] == "deny":
         reason = localized(_Keyed(d.get("key", ""), d.get("params", {})), fallback=d["reason"])
         out.append(("dim", t("render.blocked", tool=d["tool"], reason=reason)))
     elif e.kind == ev.GUARD:
-        out.append(("dim", "... " + t(d.get("key") or "guard.evidence")))
+        out.append(("dim", "... " + _guard_text(d)))
     elif e.kind == ev.EGRESS:
         what = str(d.get("what", "")).replace("\n", " ")
         out.append(("dim", t("render.egress_search" if d.get("tool") in ("web.search", "papers.search")
@@ -210,6 +223,8 @@ class App:
         i18n.set_language(cfg.language)
         self.os = os_name or osinfo.current_os()
         self.llm = llm if llm is not None else OllamaClient(cfg.model)
+        # 판단을 맡길 모델 (M9.6, Goose lead/worker). 시험에서 가짜 모델을 주면 쓰지 않는다
+        self.lead = OllamaClient(replace(cfg.model, name=cfg.model.lead)) if cfg.model.lead and llm is None else None
         self.policy = Policy(cfg.policy_layers)
         self.places = replace(
             Places.for_this_computer(cfg.home, source_dirs=source_dirs(), extra_protected=tuple(cfg.extra_protected)),
@@ -232,8 +247,10 @@ class App:
                       if cfg.index.enabled and cfg.index.embed_model else None),
             cloud=cfg.index.cloud,                                              # 클라우드 파일도 읽기 (M7.5)
         )
+        self.checker: Checker | None = Checker(self.lead or self.llm)   # 답 점검 (M9.3)
         self.translator = Translator(self.llm, keep=[s.alias for s in cfg.servers])   # 영어 답 -> 연구원님의 언어 (서버 이름은 그대로)
         self.tools = load_hands(self.os, self.hctx)
+        self._roles: list[Role] | None = None             # 역할 파일 (M9.2): 처음 쓸 때 읽는다
         self.task_log = TaskLog(cfg.home)
         self.policy_log = PolicyLog(cfg.home)
         self.memory = Conversation()                      # 이 세션의 대화 (지난 작업을 통째로 기억)
@@ -407,9 +424,13 @@ class App:
             out.append(f"Search by meaning is ready for {vec.get(model, 0)} of {sum(vec.values())} documents.")
         return out
 
-    def system_prompt(self) -> str:
-        """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록)."""
-        names = self.tools.names()
+    def system_prompt(self, names: list[str] | None = None, role_text: str | None = None) -> str:
+        """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록).
+        names, role_text: 역할로 일할 때 그 역할의 도구 이름과 지시 (M9.2). 없으면 모든 도구로."""
+        names = self.tools.names() if names is None else names
+        experiments = str(Path(self.workspace()) / "experiments")
+        if role_text is not None:
+            role_text = role_text.replace("{experiments}", experiments)
         return build_system_prompt(
             osinfo.OS_LABELS[self.os], self.cfg.model.name, tool_names=names,
             shell=shell.shell_label(self.os) if "shell.run" in names else "",
@@ -419,8 +440,24 @@ class App:
             runs=self.runner.summary_line() if self.runner is not None else "",
             notes=self.notes.prompt(notes_budget(self.cfg.model.num_ctx)),
             earlier=self.earlier_sessions_line(),
-            experiments=str(Path(self.workspace()) / "experiments") if "shell.run" in names else "",
+            experiments=experiments if "shell.run" in names else "",
+            role_text=role_text,
         )
+
+    def roles(self) -> list[Role]:
+        """이 컴퓨터에서 쓸 수 있는 역할 (M9.2). 파일은 처음 한 번 읽는다 (GLADOS_HOME/agents를 바꾸면 다시 열기)."""
+        if not self.cfg.limits.roles:
+            return []
+        if self._roles is None:
+            try:
+                self._roles = load_roles(self.cfg.home)
+            except OSError:
+                self._roles = []
+        found = usable(self._roles, self.tools)
+        if len(found) < 2:
+            return []                                  # 역할이 하나뿐이면 고를 것이 없다
+        values = {"experiments": str(Path(self.workspace()) / "experiments")}
+        return [fill(r, values) for r in found]
 
     def earlier_sessions_line(self) -> str:
         """기억이 비었을 때만: 최근 지난 대화 몇 개 (영어, 모델용). "아까 PDF 찾던 거 이어서"에 모델이 맞는 것을 골라
@@ -494,6 +531,11 @@ class App:
             if not self.llm.has_model():
                 s.say(t("model.missing", model=self.cfg.model.name))
                 return False
+            if self.lead is not None and not self.lead.has_model():   # 판단 모델이 없으면 한 모델로 (멈추지 않음)
+                s.say(t("model.lead_missing", model=self.cfg.model.lead))
+                self.lead = None
+                if self.checker is not None:
+                    self.checker = Checker(self.llm)
         except OllamaUnavailable:
             s.say(t("ollama.unreachable", host=self.cfg.model.host))
             return False
@@ -541,13 +583,16 @@ class App:
                 audit=audit,
                 overflow_dir=self.cfg.home / "logs" / "outputs",
                 task_id=task_id,
-                evidence_check=needs_evidence,
-                answer_guards=DEFAULT_GUARDS,
+                checker=self.checker if self.checker is not None and self.cfg.limits.check_answers > 0 else None,
                 translator=self.translator,
                 reply_lang=lang,
                 cancelled=cancelled,
                 plan_first=self.cfg.limits.plan_first,
                 situation=self.planning_facts() if self.cfg.limits.plan_first else "",
+                roles=self.roles() if self.cfg.limits.plan_first else None,
+                prompt_for=lambda names, text: self.system_prompt(names, text),
+                stages=self.cfg.limits.stages,
+                lead=self.lead,
             )
         except Cancelled:                                # 보통은 루프가 받아 멈춤으로 돌려준다
             self._abort(task_id, "user", t("stop.user", "en"), t("stop.user"))
@@ -1050,6 +1095,20 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as e:
         screen.say(t("config.error", detail=localized(e)))
         return 1
+
+    if args[:1] == ["--eval"]:                     # 평가 세트 (M9.1): 실제 모델로 실사용 실패 모음을 다시 잰다
+        from glados import evals
+
+        rest = args[1:]
+        allow_run = "--allow-run" in rest
+        ids = [a for a in rest if not a.startswith("--")]
+        probe = App(cfg, screen)
+        try:
+            if not probe.check_model():
+                return 1
+        finally:
+            probe.close()
+        return evals.main(cfg, screen, ids, allow_run)
 
     notes = [] if osinfo.utf8_mode_on() else [t("utf8.hint")]
     if not args and wants_tui(choice, cfg.screen):

@@ -94,12 +94,14 @@ TEXT: dict[str, dict[str, str]] = {
     "usage": {
         "ko": "사용법\n  glados              대화 시작 (TUI 화면)\n  glados --plain      줄 화면으로 대화 (TUI에서 한글 입력이 이상할 때)\n"
               "  glados \"할 일\"      한 줄로 맡기고 답을 받은 뒤 끝냄\n"
+              "  glados --eval       평가 세트를 실제 모델로 돌려 보고서를 남김 (--allow-run: 실험 명령도 실행)\n"
               "  glados --version    버전\n\n설정·기록 폴더: GLADOS_HOME 환경 변수, 없으면 ~/.glados\n"
               "화면 언어: glados.toml의 [ui] language = \"ko\" 또는 \"en\"\n"
               "화면 종류: glados.toml의 [ui] screen = \"tui\" 또는 \"plain\"",
         "en": "Usage\n  glados              start a conversation (TUI screen)\n"
               "  glados --plain      use the line screen (if typing misbehaves in the TUI)\n"
               "  glados \"task\"       run one task, print the answer, exit\n"
+              "  glados --eval       run the eval set on the real model and save a report (--allow-run: also run commands)\n"
               "  glados --version    version\n\nSettings and logs folder: GLADOS_HOME, or ~/.glados if unset\n"
               "Screen language: [ui] language = \"ko\" or \"en\" in glados.toml\n"
               "Screen type: [ui] screen = \"tui\" or \"plain\" in glados.toml",
@@ -137,6 +139,17 @@ TEXT: dict[str, dict[str, str]] = {
     # 작업 화면
     "render.working": {"ko": "작업 중...", "en": "Working..."},
     "render.plan": {"ko": "계획", "en": "Plan"},
+    "render.stage_passed": {"ko": "... 단계 {index}/{total} {stage} 끝", "en": "... stage {index}/{total} {stage} done"},
+    "render.stage_complete": {"ko": "... 마지막 단계 {stage} 끝", "en": "... last stage {stage} done"},
+    "render.stage_waiting": {"ko": "... 단계 {index}/{total} {stage}: 연구원님 동의를 기다립니다",
+                             "en": "... stage {index}/{total} {stage}: waiting for your go-ahead"},
+    "tui.stage": {"ko": "단계", "en": "stage"},
+    "tui.stage_status.now": {"ko": "시작", "en": "now"},
+    "tui.stage_status.passed": {"ko": "통과", "en": "passed"},
+    "tui.stage_status.complete": {"ko": "모두 끝", "en": "all done"},
+    "tui.stage_status.waiting": {"ko": "동의 기다림", "en": "waiting"},
+    "tui.stage_status.not_done": {"ko": "아직", "en": "not yet"},
+    "render.role": {"ko": "... {role} 역할로 넘김 · {reason}", "en": "... handed over to {role} · {reason}"},
     "render.sources": {"ko": "출처: {sources}", "en": "Sources: {sources}"},
     "render.sources_more": {"ko": "출처: {sources} 외 {count}개", "en": "Sources: {sources} (+{count} more)"},
     "render.blocked": {"ko": "[차단] {tool}: {reason}", "en": "[Blocked] {tool}: {reason}"},
@@ -146,16 +159,19 @@ TEXT: dict[str, dict[str, str]] = {
     "render.egress_fetch": {"ko": "↗ 외부 전송 · {host} · 페이지 읽기 {what}", "en": "↗ sent outside · {host} · fetch {what}"},
     "guard.sources": {"ko": "답의 출처 주소가 도구 결과에 없어 다시 확인하게 했습니다",
                       "en": "The answer cited URLs that no tool returned, so it was sent back to check"},
-    "guard.evidence": {"ko": "확인하지 않은 답이라 다시 확인하게 했습니다",
-                       "en": "Unverified answer; asked the model to check first"},
+    "guard.check": {"ko": "답을 점검해 고치게 했습니다 ({what})", "en": "Checked the answer and sent it back to fix ({what})"},
+    "check.answers_request": {"ko": "요청에 답했나", "en": "answers the request"},
+    "check.claims_supported": {"ko": "근거", "en": "evidence"},
+    "check.results_plausible": {"ko": "결과가 말이 되나", "en": "plausible results"},
+    "tui.stall": {"ko": "나아가지 못함 {count}", "en": "no progress {count}"},
+    "tui.check_passed": {"ko": "답 점검 통과", "en": "answer check passed"},
+    "tui.check_failed": {"ko": "답 점검", "en": "answer check"},
     "guard.act": {"ko": "계획만 쓰고 시작하지 않아 첫 걸음을 떼게 했습니다",
                   "en": "It only wrote a plan; asked it to take the first step"},
     "render.untranslated": {"ko": "(번역하지 못해 영어 그대로 보여 드립니다)",
                             "en": "(could not translate; showing the original)"},
     "guard.english": {"ko": "모델이 영어로 쓰지 않아 다시 쓰게 했습니다",
                       "en": "The model did not write in English; asked for a rewrite"},
-    "guard.promise": {"ko": "하겠다고만 하고 하지 않아서 지금 하게 했습니다",
-                      "en": "The model only promised to act; asked it to act now"},
     "stop.format": {"ko": "모델 출력 형식이 계속 맞지 않아 멈췄습니다.",
                     "en": "Stopped: the model kept returning malformed output."},
     "stop.same_call": {"ko": "같은 호출({tool})이 {count}번 이어져 멈췄습니다.",
@@ -705,6 +721,10 @@ TEXT: dict[str, dict[str, str]] = {
                       "en": "ui.motion in glados.toml must be true or false (now: {value})"},
     "config.notify": {"ko": "glados.toml의 ui.notify는 true 또는 false여야 합니다 (지금: {value})",
                       "en": "ui.notify in glados.toml must be true or false (now: {value})"},
+    "model.lead_missing": {"ko": "판단 모델 {model}이(가) 없어 한 모델로 씁니다 (ollama pull {model})",
+                           "en": "Lead model {model} is not installed; using one model (ollama pull {model})"},
+    "config.stages": {"ko": "glados.toml의 [loop] stages 값이 잘못되었습니다: {value} ({choices} 가운데 하나)",
+                      "en": "Invalid [loop] stages in glados.toml: {value} (one of {choices})"},
     "config.web_search": {"ko": "glados.toml의 [web] search 값이 잘못되었습니다: {value} ({choices} 가운데 하나, 또는 빈칸)",
                           "en": "Invalid [web] search in glados.toml: {value} (use one of {choices}, or leave it empty)"},
     "config.web_results": {"ko": "glados.toml의 [web] results는 1~10이어야 합니다 (지금: {value})",
@@ -725,6 +745,7 @@ TEXT: dict[str, dict[str, str]] = {
     "tui.activity": {"ko": "과정", "en": "PROCESS"},
     "tui.plan": {"ko": "계획", "en": "plan"},
     "tui.plan_check": {"ko": "확인", "en": "check"},
+    "tui.role": {"ko": "역할", "en": "role"},
     "tui.memory": {"ko": "기억", "en": "MEMORY"},
     "tui.aside.session": {"ko": "이번 세션", "en": "THIS SESSION"},
     "tui.aside.machine": {"ko": "이 컴퓨터", "en": "THIS COMPUTER"},

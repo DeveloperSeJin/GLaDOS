@@ -5,14 +5,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 
-from conftest import check, make_ctx, make_places
+from conftest import check, make_places
 from glados.config import WebConfig
 from glados.hands import HandContext, ToolError
 from glados.hands import papers, web

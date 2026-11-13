@@ -19,6 +19,9 @@
 - 대화처럼 (M8): 작업 카드에 "작업 · 완료 · 몇 초" 윗줄을 두지 않는다. 인사·답·되묻기는 말만 오가고, 도구를 쓰기
   시작하면 GLaDOS의 첫 말 아래에 진행 줄 하나("진행 중 · 2단계 · 0:12" -> "완료 · 39초 · 도구 4번")가 생긴다.
   계획 단계(영어)는 맥락의 과정에. 걸리는 시간은 머리글 상태 줄에도
+- 아래 붙기 (M8.3, 연구원님 "드래그바가 제일 아래 있으면 아래를 유지"): 가운데 대화는 Textual 앵커로 맨 아래에 붙어,
+  답·진행 줄·명령 출력이 늘어나도 따라 내려간다. 위로 올려 읽는 중이면 그 자리에 두고, 다시 맨 아래로 내리면 또 붙는다.
+  연구원님이 새로 보낸 말만 맨 아래로 데려간다 (서버 알림, 작업 끝은 읽던 자리를 건드리지 않음)
 - 마우스 (M7.9, 연구원님 요청): 끌어서 고른 뒤 오른쪽 클릭 = 복사, 고른 것이 없을 때 오른쪽 클릭 = 입력 칸에 붙여넣기
   (Windows 콘솔과 같은 방식), Ctrl+클릭 = 링크(http·https)를 브라우저로 연다. 클립보드는 운영 체제의 것
   (clipboard.py, 안 되면 터미널 복사 OSC 52). 글 속 주소는 링크 모양(밑줄)으로 그린다
@@ -57,7 +60,7 @@ from textual.widgets import Input, RichLog, Static
 import os
 
 from glados import clipboard, i18n, logo, opener, osinfo
-from glados.cli import CD, DIRECT_LINES_SHOWN, STOPS, App, Direct, Screen, _brief, _Keyed, event_lines
+from glados.cli import CD, DIRECT_LINES_SHOWN, STOPS, App, Direct, Screen, _brief, _guard_text, _Keyed, event_lines
 from glados.core.llm import Meter
 from glados.config import Config
 from glados.core import events as ev
@@ -965,6 +968,8 @@ class GladosTUI(TextualApp):
         self.engine.llm.stop_event = self.stop_event      # 모델 호출을 스트리밍으로 (멈출 수 있게)
         self.meter = Meter()                              # 작업 중에 주고받는 토큰 (화면이 따로 읽음)
         self.engine.llm.meter = self.meter
+        if self.engine.lead is not None:
+            self.engine.lead.meter = self.meter
         self._ticks = 0
         self._shown_second = -1
         self.home = HomeView(first_run, str(cfg.home))
@@ -1031,6 +1036,7 @@ class GladosTUI(TextualApp):
         self.draw_presence()
         self._timer = self.set_interval(FRAME_S, self.tick_presence, pause=True)
         self.query_one(ChatInput).focus()
+        self.main.anchor()                          # 맨 아래에 붙어 늘어나는 글을 따라간다 (위로 올리면 풀림, M8.3)
         self.call_after_refresh(self.sync_cursor)
         if self._check:
             self.set_state(t("tui.state.checking"))
@@ -1178,8 +1184,7 @@ class GladosTUI(TextualApp):
         lines = n.lines()
         card.add(Text(lines[0], style=STYLES["decision" if n.decision else "fact"]))
         for line in lines[1:]:
-            card.add(Text(line, style=STYLES["dim"]))
-        self.main.call_after_refresh(self.main.scroll_end, animate=False)
+            card.add(Text(line, style=STYLES["dim"]))     # 맨 아래에 붙어 있을 때만 따라간다 (앵커, M8.3)
         self.notify(lines[0], title=n.title(), severity="warning" if n.decision else "information",
                     timeout=20 if n.decision else 8)
         self.engine.os_notify(n)
@@ -1195,11 +1200,7 @@ class GladosTUI(TextualApp):
             return
         else:
             card = self.new_card("info", "")
-        main = self.main
-        at_end = main.scroll_y >= main.max_scroll_y - 1
-        card.add(line)
-        if at_end:
-            main.call_after_refresh(main.scroll_end, animate=False)
+        card.add(line)                                    # 맨 아래에 붙어 있으면 앵커가 따라간다 (M8.3)
 
     def action_scroll_main(self, direction: int) -> None:
         if direction < 0:
@@ -1246,7 +1247,7 @@ class GladosTUI(TextualApp):
                 first = (str(d.get("text", "")).splitlines() or [""])[0]
                 card.add(Text("  " + first, style=FAINT))      # "$ 명령" (제안 줄은 맥락의 과정에만)
             for style, text in event_lines(e):
-                if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.EGRESS) and side):
+                if e.kind == ev.START or (e.kind in (ev.PROPOSAL, ev.EGRESS, ev.ROLE, ev.STAGE) and side):
                     continue
                 if e.kind == ev.PLAN and side and not d.get("say"):
                     continue                              # 계획 단계는 맥락에만. 카드에는 GLaDOS의 첫 말 (M8)
@@ -1300,7 +1301,8 @@ class GladosTUI(TextualApp):
             goal = str(d.get("goal") or "")
             if d.get("say"):
                 log.write(Text(f"   \u201c{d['say']}\u201d", style=MUTED))       # 연구원님께 한 첫 말
-            log.write(Text(t("tui.plan") + (f" · {goal}" if goal else ""), style=FAINT))
+            role = f" · {t('tui.role')} {d['role']}" if d.get("role") else ""   # 고른 역할 (M9.2)
+            log.write(Text(t("tui.plan") + role + (f" · {goal}" if goal else ""), style=FAINT))
             for i, step in enumerate(d.get("plan") or [], 1):
                 log.write(Text(f"   {i}) {step}", style=WHITE))
             if d.get("check"):
@@ -1312,6 +1314,8 @@ class GladosTUI(TextualApp):
             log.write(Text(f"{d.get('step')}. {thought}", style=MUTED))
         elif e.kind == ev.PROPOSAL:
             log.write(Text(f"   -> {d['tool']} {_brief(d.get('args', {}), 120)}", style=WHITE))
+        elif e.kind == ev.ROLE:
+            log.write(Text(f"   ⇄ {t('tui.role')} {d.get('role', '')} · {str(d.get('reason', ''))[:100]}", style=COBALT))
         elif e.kind == ev.DECISION:
             verdict = d["verdict"]
             if verdict == "ask":
@@ -1327,7 +1331,20 @@ class GladosTUI(TextualApp):
             first = (str(d.get("text", "")).strip().splitlines() or [""])[0]
             log.write(Text(f"      <- {first[:160]}", style=MUTED if first.startswith("Error") else FAINT))
         elif e.kind == ev.GUARD:
-            log.write(Text("   ! " + t(d.get("key") or "guard.evidence"), style=MUTED))
+            log.write(Text("   ! " + _guard_text(d), style=MUTED))
+        elif e.kind == ev.STAGE:
+            status = t(f"tui.stage_status.{d.get('status', 'now')}")
+            why = f" · {str(d.get('reason') or '')[:120]}" if d.get("status") == "not_done" and d.get("reason") else ""
+            log.write(Text(f"   ▸ {t('tui.stage')} {d.get('index')}/{d.get('total')} {d.get('stage', '')} · {status}{why}",
+                           style=COBALT if d.get("status") in ("now", "waiting") else FAINT))
+        elif e.kind == ev.STALL:
+            log.write(Text(f"   ~ {t('tui.stall', count=d.get('stalls', 0))} · {str(d.get('reason', ''))[:140]}",
+                           style=MUTED))
+        elif e.kind == ev.CHECK:
+            if d.get("passed"):
+                log.write(Text(f"   ✓ {t('tui.check_passed')}", style=FAINT))
+            for key, reason in d.get("failed") or []:
+                log.write(Text(f"   ! {t('tui.check_failed')} · {t('check.' + key)} · {str(reason)[:160]}", style=MUTED))
         elif e.kind == ev.EGRESS:
             what = str(d.get("what", "")).replace("\n", " ")
             log.write(Text.assemble(("      ↗ ", WHITE), (str(d.get("host", "")), WHITE),
@@ -1832,8 +1849,7 @@ class GladosTUI(TextualApp):
             self.set_state(t("tui.state.idle"))
         self.set_presence("done")
         self.refresh_memory()
-        self.refresh_aside()
-        self.main.call_after_refresh(self.main.scroll_end, animate=False)
+        self.refresh_aside()                              # 끝나도 읽던 자리는 그대로 (맨 아래면 앵커가 따라감, M8.3)
 
     def action_stop_task(self) -> None:
         """Esc: 작업 중이면 멈춘다 (쓰던 글은 건드리지 않는다)."""

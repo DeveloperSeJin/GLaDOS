@@ -92,10 +92,14 @@ class ModelConfig:
     think: bool = False
     keep_alive: str = "30m"
     mode: str = "normal"
+    lead: str = ""                   # 판단을 맡길 다른 모델 (M9.6, Goose lead/worker): 대화 차례·답 점검·단계 확인. 비면 같은 모델
 
     @property
     def is_low(self) -> bool:
         return self.mode == "low"
+
+
+STAGE_MODES = ("auto", "pilot", "off")
 
 
 @dataclass
@@ -108,6 +112,11 @@ class LoopLimits:
     remote_timeout_s: int = 300
     plan_first: bool = True          # 행동하기 전에 계획을 먼저 세운다 (M7.7)
     checkin_steps: int = 6           # 도구를 이만큼 쓰면 돌아와 지금까지를 말하고 계속할지 묻는다 (M8). 0이면 안 함
+    max_stalls: int = 3              # 나아가지 못한 걸음이 이만큼이면 다시 계획 (M9.4, Magentic-One). 0이면 안 봄
+    replans: int = 1                 # 막혀서 다시 계획하는 횟수. 그래도 막히면 돌아와 묻는다
+    check_answers: int = 2           # 답을 내기 전 점검 (M9.3): 걸리면 고치게 되돌리는 최대 횟수. 0이면 점검하지 않음
+    stages: str = "auto"             # 실험 단계 (M9.5): auto(가설만 동의) | pilot(단계마다 기다림) | off
+    roles: bool = True               # 대화 차례가 일의 종류(역할)를 고르고, 그 역할의 지시와 도구만으로 일한다 (M9.2)
 
 
 @dataclass
@@ -210,6 +219,7 @@ def load_config(home: Path) -> Config:
         think=bool(model_sec.get("think", False)),
         keep_alive=str(model_sec.get("keep_alive", "30m")),
         mode=mode,
+        lead=str(picked.get("lead", "")).strip(),
     )
 
     ui = main.get("ui", {})
@@ -227,8 +237,11 @@ def load_config(home: Path) -> Config:
         raise ConfigError("config.notify", value=notify)
 
     loop_sec = main.get("loop", {})
-    limits = LoopLimits(**{k: (bool(v) if k == "plan_first" else int(v))
+    limits = LoopLimits(**{k: (bool(v) if k in ("plan_first", "roles") else str(v).strip().lower() if k == "stages"
+                               else int(v))
                            for k, v in loop_sec.items() if k in LoopLimits.__dataclass_fields__})
+    if limits.stages not in STAGE_MODES:
+        raise ConfigError("config.stages", value=limits.stages, choices=", ".join(STAGE_MODES))
 
     web_sec = main.get("web", {})                     # 예전 설정 파일에는 없다 → 검색 없음
     search = str(web_sec.get("search", "")).strip().lower()

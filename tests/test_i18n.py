@@ -13,7 +13,6 @@ from conftest import FakeLLM, act, answer, check, make_ctx, make_places
 from glados import cli, i18n, osinfo
 from glados.config import ConfigError, ensure_home, load_config, peek_language
 from glados.core.context import BRIEF, CLIPPED, DROPPED, FULL
-from glados.core.guards import about_files
 from glados.hands import Tool, ToolRegistry
 from glados.i18n import TEXT, localized, t
 
@@ -194,13 +193,6 @@ def test_lang_command_switches_this_session(english_app):
 
 
 # ---------------------------------------------------------------- 영어 요청
-def test_file_talk_is_detected_in_english():
-    """근거 확인은 영어 글(요청 + 모델의 영어 생각과 답)로 판단한다."""
-    for q in ("find the paper in my Downloads", "Summarize the PDF you found", "read it again", "save that as notes.md",
-              "다운로드에서 찾아줘\nSearch the Downloads folder for the thesis."):
-        assert about_files(q), q
-    for q in ("hello", "how are you", "tell me a joke", "I am already here", "안녕\nGreet the Researcher."):
-        assert not about_files(q), q
 
 
 def test_english_folder_names_in_search(tmp_path):

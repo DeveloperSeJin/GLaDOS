@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from conftest import FakeLLM, act, answer, base_layers, make_ctx
+from conftest import FakeLLM, act, answer, base_layers, make_ctx, verdict
 from glados import cli
 from glados.config import LoopLimits, ensure_home, load_config
 from glados.core import events as ev
@@ -86,11 +86,11 @@ def test_plans_before_acting():
     assert "This is your turn in the conversation." in system and "G:\\ (Google Drive)" in system
     assert "never narrow to a place the Researcher did not name" in system
     assert "Before you act" not in llm.calls[1][0][0]["content"]          # 계획 지시는 계획 호출에만
-    assert llm.calls[1][1]["required"] == ["thought", "action", "done"]   # 계획이 있으니 걸음은 보통 형식
+    assert llm.calls[1][1]["required"] == ["progress", "thought", "action", "done"]   # 계획이 있으니 걸음은 보통 형식
     sent = llm.calls[1][0]
     assert sent[-2]["role"] == "assistant" and GOAL in sent[-2]["content"]  # 다음 걸음이 계획을 본다
     assert sent[-1]["content"] == NUDGE_PLANNED.format(goal=GOAL)
-    assert "not a narrower question you made up" in sent[-1]["content"]          # 목표는 말한 범위 그대로 (M7.8)
+    assert "narrower" not in sent[-1]["content"]                           # 범위는 M9.3부터 답 점검이 본다
     plan_events = [e for e in events if e.kind == ev.PLAN]
     assert len(plan_events) == 1
     data = plan_events[0].data
@@ -124,19 +124,23 @@ def test_no_tools_needed_answers_from_the_plan_call():
     assert '"done":true' in result.transcript[-1]["content"].replace(" ", "")   # 기억에는 보통 걸음 모양
 
 
-def test_direct_answer_about_files_is_still_checked():
-    """도구 없이 답했는데 파일 이야기면 근거 확인이 한 번 되돌린다 (계획에서 next="answer"를 골라도)."""
-    from glados.core.guards import needs_evidence
+def test_direct_answer_is_still_checked_with_the_planning_message():
+    """대화 차례가 도구 없이 바로 답해도 답 점검을 거친다 (M9.3). 그 차례의 시스템 메시지 그대로 뒤에 붙인다."""
+    from glados.core.checker import Checker
 
     tools = ToolRegistry([finder()])
     llm = FakeLLM([said("There is no such file.", goal="Find the file."),
-                   act("fs.search", query="license"), answer("There is no license photo in the searched drives.")])
+                   verdict(claims_supported="No search was done."),
+                   act("fs.search", query="license"), answer("There is no license photo in the searched drives."),
+                   verdict()])
     events = []
     result = run_task("Find my license photo file", llm=llm, policy=Policy(base_layers()),
                       ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
-                      limits=LoopLimits(), system_prompt="test", emit=events.append, evidence_check=needs_evidence)
-    assert result.status == "done" and len(llm.calls) == 3
-    assert [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.evidence"]
+                      limits=LoopLimits(), system_prompt="test", emit=events.append, checker=Checker(llm))
+    assert result.status == "done" and len(llm.calls) == 5
+    assert [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.check"]
+    assert llm.calls[1][0][0] == llm.calls[0][0][0]                            # 대화 차례의 시스템 메시지
+    assert llm.calls[4][0][0] == llm.calls[2][0][0]                            # 걸음의 시스템 메시지
 
 
 def test_first_words_are_translated_for_the_screen():
@@ -168,14 +172,14 @@ def test_bad_planning_reply_falls_back_to_planning_in_the_first_step():
     llm = FakeLLM([FormatError("bad json"), {**act("fs.search", query="license"), "plan": plan}, answer("Not found.")])
     result, events = run(llm)
     assert result.status == "done" and result.steps == 2
-    assert llm.calls[1][1]["required"] == ["plan", "thought", "action", "done"]   # 예전처럼 첫 걸음에 계획
+    assert llm.calls[1][1]["required"] == ["progress", "plan", "thought", "action", "done"]   # 예전처럼 첫 걸음에 계획
     assert [e.data["plan"] for e in events if e.kind == ev.PLAN] == [plan]
 
 
 def test_plan_first_can_be_turned_off():
     llm = FakeLLM([{**act("fs.search", query="license"), "plan": ["Search."]}, answer("Not found.")])
     result, _ = run(llm, plan_first=False)
-    assert result.status == "done" and llm.calls[0][1]["required"] == ["plan", "thought", "action", "done"]
+    assert result.status == "done" and llm.calls[0][1]["required"] == ["progress", "plan", "thought", "action", "done"]
 
 
 def test_no_planning_call_without_tools():
@@ -266,7 +270,7 @@ class ToKorean:
 def test_unclear_request_is_asked_back_without_tools():
     """실제로 난 일 (2026-11-12): 한 단어 요청에 모델이 연구 과제를 지어내 논문·웹 검색을 12걸음 하고 멈춤 (밖으로 18번).
     이제는 무엇을 원하는지 모르면 짐작하지 않고 묻고 끝낸다. 도구도, 밖으로 나가는 것도 없다."""
-    from glados.core.guards import DEFAULT_GUARDS
+    from glados.core.checker import Checker
 
     calls = []
     tools = ToolRegistry([finder(calls), Tool("web.search", "search the web", run=lambda a: calls.append(a) or "")])
@@ -275,7 +279,7 @@ def test_unclear_request_is_asked_back_without_tools():
     result = run_task("word", llm=llm, policy=Policy(base_layers()),
                       ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
                       limits=LoopLimits(), system_prompt="test", emit=events.append,
-                      evidence_check=lambda text: True, answer_guards=DEFAULT_GUARDS)    # 안전망이 있어도 질문은 그대로
+                      checker=Checker(llm))                         # 점검이 있어도 되묻기는 그대로 (기다린다)
     assert result.status == "done" and result.reason == "ask" and result.steps == 0
     assert result.answer.fact == QUESTION and len(llm.calls) == 1 and calls == []
     kinds = [e.kind for e in events]
@@ -317,7 +321,8 @@ def test_planning_keeps_the_researchers_scope():
 
     assert "Do not add details they did not give" in PLANNING and '"ask" if you cannot tell' in PLANNING
     assert "do not guess" in PLANNING and "conversation does not settle it" in PLANNING
-    assert "Never swap it for a narrower question of your own" in CONTRACT
+    from glados.core.checker import CHECK_PROMPT
+    assert "{rubric}" in CONTRACT and "A narrower question swapped in for the request does not count" in CHECK_PROMPT
     assert plan_schema()["properties"]["next"]["enum"] == ["ask", "answer", "act"]
     assert Plan.model_validate({"next": "act", "plan": []}).next == "act"         # 계획이 없어도 받는다 (M8)
     for bad in ({"next": "ask", "say": ""}, {"next": "answer"}, {"next": "maybe", "say": "x"}):
@@ -412,12 +417,13 @@ def test_wit_is_optional_and_only_english():
 
 
 def test_role_and_rules_do_not_frame_everything_as_an_experiment():
-    from glados.core.prompts import CONTRACT, PLANNING, ROLE, persona, reply_note
+    from glados.core.prompts import PLANNING, ROLE, persona, reply_note
 
     assert "lab assistant" in ROLE and "Small talk gets a short, natural reply" in ROLE and "scientist" not in ROLE
     assert "settle its goal and hypothesis with them before running anything" in ROLE
     assert persona().splitlines()[1].startswith("For experiments, you form a hypothesis")
-    assert "Never claim what the system, a file, or data can do unless a result shows it." in CONTRACT
+    from glados.core.checker import RUBRIC
+    assert "is every claim about files, data, results, this computer, or the current world backed" in RUBRIC
     assert 'If say asks the Researcher anything, next is "ask"' in PLANNING
     note = reply_note("ko")
     assert "Still write everything in English" in note and "안녕" not in note             # M8.3: 한국어 예는 뺐다
@@ -427,7 +433,7 @@ def test_role_and_rules_do_not_frame_everything_as_an_experiment():
 def test_experiment_rules_name_the_experiments_folder(tmp_path):
     """연구원님이 고른 ②: 정리하라고 하자 새 난수로 다시 돌려 보고서 숫자가 달라짐 -> 스크립트 파일 + 고정 seed,
     정리할 때는 앞 결과를 쓴다, 보여 달라는 것은 답에 넣는다."""
-    from glados.core.prompts import CONTRACT, FILE_RULES
+    from glados.core.prompts import FILE_RULES
 
     app, _ = open_app(tmp_path)
     try:
@@ -438,7 +444,8 @@ def test_experiment_rules_name_the_experiments_folder(tmp_path):
         assert "use the same script and seed so the numbers stay the same" in prompt
     finally:
         app.close()
-    assert "put it in answer.fact itself (a Markdown table is fine)" in CONTRACT
+    from glados.core.checker import RUBRIC
+    assert "anything they asked to see goes in answer.fact itself" in RUBRIC
     assert "or for an experiment's script (see Experiments)" in FILE_RULES
 
 
@@ -447,3 +454,134 @@ def test_no_experiment_rules_without_commands():
 
     prompt = build_system_prompt("Windows 11", "qwen3.5:4b", tool_names=["fs.search", "fs.write_new"])
     assert "Experiments:" not in prompt
+
+
+# ---------------------------------------------------------------- 이상한 결과·빠진 정보·중간 보고 질문 (M8.5)
+def test_checkin_report_always_ends_with_a_question():
+    tools = ToolRegistry([finder()])
+    report = answer("The script was fixed but not run yet.")
+    llm = FakeLLM([planned()] + [act("fs.search", query=f"license {i}") for i in range(6)] + [report])
+    result, _ = run(llm, tools=tools)
+    assert result.reason == "checkin" and result.answer.fact == "The script was fixed but not run yet. Shall I go on, and how?"
+    assert "Shall I go on, and how?" in result.transcript[-1]["content"]
+    asked = answer("I searched 6 places. Shall I look in G:?")
+    llm = FakeLLM([planned()] + [act("fs.search", query=f"license {i}") for i in range(6)] + [asked])
+    result, _ = run(llm, tools=ToolRegistry([finder()]))
+    assert result.answer.fact == "I searched 6 places. Shall I look in G:?"                    # 이미 물었으면 그대로
+
+
+def test_rules_for_odd_results_and_missing_details(tmp_path):
+    from glados.core.prompts import CONTRACT, PLANNING
+
+    from glados.core.checker import CHECK_PROMPT, RUBRIC               # M9.3: 판단은 답 점검이 (기준은 한 곳)
+    assert "A p-value of exactly 1 or 0, a test statistic of exactly 0" in CHECK_PROMPT
+    assert "could the method used give the reported results" in CONTRACT.replace("{rubric}", RUBRIC)
+    assert "if it needs a detail you do not have and the notes and conversation do not give it" in PLANNING
+    app, _ = open_app(tmp_path)
+    try:
+        assert "name the test and what it assumes, and say what the result shows and what it does not show" in app.system_prompt()
+    finally:
+        app.close()
+
+
+# ---------------------------------------------------------------------- 막혔을 때 (M9.4)
+def stuck(tool="fs.search", reason="Same empty result again.", **args):
+    step = act(tool, **(args or {"query": "x"}))
+    step["progress"] = {"reason": reason, "answer": False}
+    return step
+
+
+def moving(tool="fs.search", **args):
+    step = act(tool, **(args or {"query": "y"}))
+    step["progress"] = {"reason": "New results.", "answer": True}
+    return step
+
+
+def test_stalled_work_is_planned_again_from_what_was_learned():
+    """Magentic-One 진행 장부처럼: 걸음마다 모델이 나아가고 있는지 적고, 아니라는 걸음이 max_stalls번 쌓이면
+    대화 차례로 돌아가 계획을 다시 세운다. 막힌 걸음은 하지 않는다."""
+    calls = []
+    tools = ToolRegistry([finder(calls)])
+    llm = FakeLLM([planned(), act("fs.search", query="a"), stuck(query="b"), stuck(query="c"),
+                   stuck(query="d"),                                    # 3번째 "아님" -> 다시 계획 (d는 하지 않음)
+                   planned(goal="Find it another way.", steps=["Look inside photos with fs.inspect."],
+                           say="Names did not help; I will look inside the photos."),
+                   act("fs.search", query="f"), answer("Not found.")])
+    result, events = run(llm, tools=tools)
+    assert result.status == "done" and [c["query"] for c in calls] == ["a", "b", "c", "f"]
+    assert [e.data["stalls"] for e in events if e.kind == ev.STALL] == [1, 2, 3]
+    plans = [e for e in events if e.kind == ev.PLAN and "say" in e.data]
+    assert [p.data["step"] for p in plans] == [0, 3] and plans[1].data["goal"] == "Find it another way."
+    replan_msgs = llm.calls[5][0]
+    assert "Before you act" in replan_msgs[0]["content"]                          # 대화 차례의 시스템 메시지
+    assert replan_msgs[-1]["content"].startswith("[check] The work is not moving forward (3 steps in a row; last: "
+                                                 "Same empty result again.)")
+    assert not any('"d"' in m["content"] for m in replan_msgs)                  # 막힌 걸음은 대화에서 뺀다
+
+
+def test_still_stuck_after_a_new_plan_comes_back_and_asks():
+    tools = ToolRegistry([finder()])
+    report = answer("I searched names and photos and found nothing. Shall I try G:?")
+    llm = FakeLLM([planned(), act("fs.search", query="a"), stuck(query="b"), stuck(query="c"), stuck(query="d"),
+                   planned(goal="Try again."), stuck(query="f"), stuck(query="g"), stuck(query="h"), report])
+    result, events = run(llm, tools=tools)
+    assert result.reason == "checkin" and result.answer.fact.endswith("Shall I try G:?")
+    assert llm.calls[-1][0][-1]["content"].startswith("[check] The work is still not moving forward after a new plan.")
+
+
+def test_a_new_plan_can_also_ask_the_researcher():
+    tools = ToolRegistry([finder()])
+    llm = FakeLLM([planned(), act("fs.search", query="a"), stuck(query="b"), stuck(query="c"), stuck(query="d"),
+                   said("Names and contents found nothing. Is the photo on your phone?", next_="ask")])
+    result, events = run(llm, tools=tools)
+    assert result.reason == "ask" and result.steps == 3 and "phone" in result.answer.fact
+
+
+def test_progress_is_not_counted_on_the_first_step_or_when_off():
+    tools = ToolRegistry([finder()])
+    llm = FakeLLM([planned(), stuck(query="a"), answer("Not found.")])
+    result, events = run(llm, tools=tools)
+    assert not any(e.kind == ev.STALL for e in events)                        # 첫 걸음은 볼 결과가 없다
+    events = []
+    llm = FakeLLM([planned(), act("fs.search", query="a"), stuck(query="b"), moving(query="c"), stuck(query="d"),
+                   stuck(query="e"), answer("Not found.")])
+    run_task("find it", llm=llm, policy=Policy(base_layers()),
+             ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
+             limits=LoopLimits(max_stalls=0), system_prompt="test", emit=events.append)
+    assert len(llm.calls) == 7 and not any(e.kind == ev.PLAN and e.data.get("step") for e in events)
+    assert [e.data["stalls"] for e in events if e.kind == ev.STALL] == [1, 1, 2]   # 나아가면 하나 줄인다 (Magentic-One)
+
+
+# ---------------------------------------------------------------------- 판단 모델 (M9.6)
+def test_lead_model_takes_the_conversation_turns_and_failed_steps():
+    """Goose lead/worker처럼: 판단(대화 차례·답 점검·단계 확인)은 lead, 걸음은 worker. worker가 형식을 못 맞추면
+    그 걸음을 lead가 한 번 더."""
+    from glados.core.checker import Checker
+
+    tools = ToolRegistry([finder()])
+    lead = FakeLLM([planned(), verdict()])
+    worker = FakeLLM([FormatError("bad json"), act("fs.search", query="license"), answer("Not found.")])
+    lead.steps.insert(1, act("fs.search", query="x"))       # 형식이 깨진 첫 걸음은 lead가
+    events = []
+    result = run_task("find my license photo", llm=worker, policy=Policy(base_layers()),
+                      ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
+                      limits=LoopLimits(), system_prompt="test", emit=events.append, lead=lead,
+                      checker=Checker(lead))
+    assert result.status == "done" and result.answer.fact == "Not found."
+    assert len(lead.calls) == 3 and "Before you act" in lead.calls[0][0][0]["content"]      # 대화 차례, 걸음 1, 점검
+    assert lead.calls[2][0][-1]["content"].startswith("[check] Before your draft answer")
+    assert len(worker.calls) == 3
+
+
+def test_app_lead_model_setting(tmp_path):
+    home = tmp_path / "gh"
+    ensure_home(home)
+    text = (home / "glados.toml").read_text(encoding="utf-8")
+    (home / "glados.toml").write_text(text.replace('name = "qwen3.5:9b"              # 맥은', 'lead = "qwen3.5:27b"\nname = "qwen3.5:9b"              # 맥은', 1).replace('lead = ""                        # 판단(', '# lead (', 1), encoding="utf-8")
+    cfg = load_config(home)
+    assert cfg.model.lead == "qwen3.5:27b"
+    app = cli.App(cfg, cli.Screen(ansi=False, out=io.StringIO()), os_name="linux")
+    try:
+        assert app.lead is not None and app.lead.cfg.name == "qwen3.5:27b"
+    finally:
+        app.close()

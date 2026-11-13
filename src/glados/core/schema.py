@@ -41,7 +41,15 @@ class Answer(BaseModel):
     wit: str = ""
 
 
+class Progress(BaseModel):
+    """나아가고 있나 (M9.4, Magentic-One 진행 장부의 is_progress_being_made: reason과 answer)."""
+    reason: str = ""
+    answer: bool = True
+
+
 class Step(BaseModel):
+    progress: Progress | None = None
+    stage_done: Progress | None = None              # 지금 단계를 끝냈나, 무엇을 냈나 (M9.5, 단계가 있는 역할만)
     plan: list[str] = Field(default_factory=list)
     thought: str = ""
     action: Action | None = None
@@ -53,7 +61,8 @@ class Step(BaseModel):
     def _check(self) -> "Step":
         if self.done and self.answer is None:
             raise ValueError("done is true, so answer is required")
-        if not self.done and self.action is None and not any(p.strip() for p in self.plan):
+        stage_done = self.stage_done is not None and self.stage_done.answer     # 단계를 끝냈다는 걸음 (M9.5)
+        if not self.done and self.action is None and not any(p.strip() for p in self.plan) and not stage_done:
             raise ValueError("done is false, so action is required")      # 계획만 쓴 답은 루프가 받아 되돌린다
         if self.done and not self.answer.fact.strip():  # type: ignore[union-attr]
             raise ValueError("answer.fact is empty")
@@ -67,6 +76,8 @@ class Plan(BaseModel):
     """대화 차례: 행동하기 전의 첫 말과 계획 (M7.7, M8)."""
     goal: str = ""
     next: Literal["ask", "answer", "act"]
+    role: str = ""                                   # 일의 종류 (M9.2, 역할이 있을 때만 형식에 나온다)
+    stage: str = ""                                  # 단계가 있는 역할에서 시작할 단계 (M9.5, 선택)
     plan: list[str] = Field(default_factory=list)
     check: str = ""
     say: str = ""
@@ -97,9 +108,11 @@ ANSWER_SCHEMA: dict[str, Any] = {
 }
 
 
-def step_schema(tools: list[str] | list[tuple[str, dict[str, Any]]], plan: bool = False) -> dict[str, Any]:
+def step_schema(tools: list[str] | list[tuple[str, dict[str, Any]]], plan: bool = False,
+                staged: bool = False) -> dict[str, Any]:
     """tools: 도구 이름 목록, 또는 (이름, 인자 스키마) 목록. 인자 스키마가 있으면 도구별로 인자를 좁힌다.
-    plan: 첫 걸음이면 계획을 꼭 쓰게 한다 (도구가 없으면 계획 없이 바로 답)."""
+    plan: 첫 걸음이면 계획을 꼭 쓰게 한다 (도구가 없으면 계획 없이 바로 답).
+    staged: 단계가 있는 역할 (M9.5): progress 다음에 stage_done (지금 단계를 끝냈나)."""
     specs = [(t, {}) if isinstance(t, str) else (t[0], t[1]) for t in tools]
     if not specs:
         return {
@@ -126,9 +139,14 @@ def step_schema(tools: list[str] | list[tuple[str, dict[str, Any]]], plan: bool 
     plan_schema: dict[str, Any] = {"type": "array", "items": {"type": "string"}, "maxItems": MAX_PLAN}
     if plan:
         plan_schema["minItems"] = 1
+    progress = {"type": "object", "properties": {"reason": {"type": "string"}, "answer": {"type": "boolean"}},
+                "required": ["reason", "answer"]}
+    stage = {"stage_done": progress} if staged else {}
     return {
         "type": "object",
         "properties": {
+            "progress": progress,
+            **stage,
             "plan": plan_schema,
             "thought": {"type": "string"},
             "action": {"anyOf": [*actions, {"type": "null"}]},
@@ -136,13 +154,16 @@ def step_schema(tools: list[str] | list[tuple[str, dict[str, Any]]], plan: bool 
             "answer": {"anyOf": [ANSWER_SCHEMA, {"type": "null"}]},
             "sources": {"type": "array", "items": {"type": "string"}},
         },
-        "required": (["plan"] if plan else []) + ["thought", "action", "done"],
+        "required": ["progress"] + (["stage_done"] if staged else []) + (["plan"] if plan else [])
+        + ["thought", "action", "done"],
     }
 
 
-def plan_schema() -> dict[str, Any]:
-    """대화 차례의 형식 (필수 칸 순서대로 쓰게 된다: 목표 -> 다음 -> 계획 -> 확인 -> 할 말 -> 위트 -> 출처)."""
-    return {
+def plan_schema(roles: list[str] | None = None, stages: list[str] | None = None) -> dict[str, Any]:
+    """대화 차례의 형식 (필수 칸 순서대로 쓰게 된다: 목표 -> 다음 -> (역할) -> 계획 -> 확인 -> 할 말 -> 출처 -> 위트).
+    roles: 고를 수 있는 역할 이름 (M9.2). 있으면 next 다음에 role을 쓰게 한다.
+    stages: 단계가 있는 역할의 단계 이름들 (M9.5). 있으면 선택 칸 stage (어디서 시작할지)."""
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "goal": {"type": "string"},
@@ -155,3 +176,12 @@ def plan_schema() -> dict[str, Any]:
         },
         "required": ["goal", "next", "plan", "check", "say", "sources"],      # wit은 선택 (M8.2)
     }
+    if roles:
+        props = schema["properties"]
+        ordered = {"goal": props["goal"], "next": props["next"], "role": {"type": "string", "enum": list(roles)}}
+        ordered.update({k: v for k, v in props.items() if k not in ordered})
+        schema["properties"] = ordered
+        schema["required"] = ["goal", "next", "role", "plan", "check", "say", "sources"]
+        if stages:
+            schema["properties"]["stage"] = {"type": "string", "enum": list(dict.fromkeys(stages))}
+    return schema

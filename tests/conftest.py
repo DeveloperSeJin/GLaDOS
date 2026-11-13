@@ -54,6 +54,14 @@ def _no_default_search(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_answer_check(monkeypatch):
+    """App이 만드는 답 점검(M9.3)은 끈다: 가짜 모델의 차례에 점검 답까지 끼우지 않게.
+    점검을 보는 시험은 run_task에 checker를 직접 주거나 app.checker = Checker(app.llm)."""
+    from glados import cli
+    monkeypatch.setattr(cli, "Checker", lambda llm: None)
+
+
+@pytest.fixture(autouse=True)
 def _korean_screen():
     """화면 언어는 전역이라, 영어로 바꾼 시험이 다른 시험에 새지 않게."""
     from glados import i18n
@@ -123,6 +131,12 @@ class StaticGlossary:
             if key in self.words:
                 out[key] = self.words[key]
         return out
+
+
+def verdict(**failed: str) -> dict[str, Any]:
+    """답 점검(M9.3)의 가짜 모델 답. failed: 걸린 기준 -> 이유. 비면 모두 통과."""
+    from glados.core.checker import KEYS
+    return {k: {"reason": failed.get(k, "Fine."), "answer": k not in failed} for k in KEYS}
 
 
 def answer(fact: str = "Done.", wit: str = "", sources: list[str] | None = None) -> dict[str, Any]:

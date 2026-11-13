@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from conftest import FakeLLM, act, answer, base_layers, make_ctx
+from conftest import FakeLLM, act, answer, base_layers, make_ctx, verdict
 from glados.config import LoopLimits
 from glados.core import context as cx
 from glados.core.context import BRIEF, CLIPPED, DROPPED, FULL, Conversation, Turn
-from glados.core.loop import NUDGE_EVIDENCE, TaskResult, run_task
+from glados.core.checker import Checker
+from glados.core.loop import TaskResult, run_task
 from glados.core.schema import Answer
 from glados.hands import Tool, ToolRegistry
 from glados.safety.policy import Policy
@@ -163,13 +164,13 @@ def reader(text=f"[{PAPER}] 전체 2700자\n{BODY}"):
     return Tool("fs.read", "read", run=lambda a: text)
 
 
-def run(llm, memory, request, tools=None, context_chars=None, evidence=True):
+def run(llm, memory, request, tools=None, context_chars=None, check=False):
     tools = tools or ToolRegistry([reader()])
     return run_task(
         request, llm=llm, policy=Policy(base_layers()),
         ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
         limits=LoopLimits(), system_prompt="test", memory=memory, context_chars=context_chars,
-        evidence_check=(lambda r: True) if evidence else None,
+        checker=Checker(llm) if check else None,
     )
 
 
@@ -188,10 +189,11 @@ def test_loop_remembers_previous_task_in_full():
 
 def test_transcript_skips_sent_back_answer():
     memory = Conversation()
-    llm = FakeLLM([answer("There are 0."), act("fs.read", path=PAPER), answer("I read it.", "", [PAPER])])
-    result = run(llm, memory, "찾은 PDF 읽어줘")
+    llm = FakeLLM([answer("There are 0."), verdict(claims_supported="No tool result shows it."),
+                   act("fs.read", path=PAPER), answer("I read it.", "", [PAPER]), verdict()])
+    result = run(llm, memory, "찾은 PDF 읽어줘", check=True)
     contents = [m["content"] for m in result.transcript]
-    assert not any("There are 0." in c for c in contents) and NUDGE_EVIDENCE not in contents
+    assert not any("There are 0." in c or "[check]" in c for c in contents)
     assert len(result.transcript) == 3                                     # 읽기 걸음, 관찰, 답
 
 

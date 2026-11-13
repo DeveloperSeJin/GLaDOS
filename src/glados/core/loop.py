@@ -9,7 +9,7 @@
   (연구원님 결정: 승인을 기다리지 않음). 화면에는 연구원님의 언어로 옮겨 보인다
 - 되묻기 (M7.8, 연구원님 "의도파악을 너무 못하는데": "섹스" 한 단어에 연구 과제를 지어내 논문을 12걸음 찾음):
   무엇을 원하는지 알 수 없으면 짐작하지 않고 짧은 질문 하나(뜻 두세 가지)로 작업을 끝낸다. 도구도, 밖으로 나가는
-  검색도 없다. 질문은 안전망을 거치지 않는다 (사실을 말하는 답이 아니라서). 기억에는 남겨 다음 말과 이어지게 한다
+  검색도 없다. 질문은 답 점검을 거치지 않는다 (사실을 말하는 답이 아니라서). 기억에는 남겨 다음 말과 이어지게 한다
 - 목표는 연구원님이 말한 범위 그대로 (M7.8): 계획 뒤 안내에 목표를 다시 적고, 지어낸 좁은 질문으로 바꿔 답하지 말라고 한다
 - 계획은 이번 작업에만 넣는다 (다음 작업의 기억에는 걸음들만 남는다)
 - 계획 답이 형식을 못 맞추면 예전처럼 첫 걸음에 계획을 받는다 (M2.7)
@@ -26,11 +26,17 @@
 - 모델은 전부 영어로 쓴다: 생각, 도구 인자, 대화 차례의 say, 답 (M8.3 연구원님 "그냥 전부 영어로 하라니까 한글은 번역투여도
   돼". M8에서 한국어로 바로 쓰게 했더니 생각·계획까지 한국어로 새고 말투가 흔들렸다)
 - 화면에 낼 때만 연구원님의 언어로 옮긴다 (translator). 위트(wit)는 영어 그대로, 맞을 때만
-- 답이 영어가 아니면 한 번 되돌린다. 그래도 아니면 그대로 받는다 (안전망은 영어 답에만)
+- 답이 영어가 아니면 한 번 되돌린다. 그래도 아니면 그대로 받는다
 
 물으면 기다리기 (M8.2, 연구원님 "이상한 말을 하네": 첫 말로 "목적과 가설을 정해 주시겠습니까?"라고 묻고는 진행)
 - 대화 차례의 첫 말(say)이 물음으로 끝나면 next가 act여도 되묻기로 본다: 도구를 쓰지 않고 연구원님 답을 기다린다
 - 위트는 선택 칸이고, 영어가 아니면 보여 주지도 기억하지도 않는다 (연구원님 결정 "위트는 영어 유지")
+
+역할 (M9.2, core/roles.py): roles가 있으면 대화 차례가 일의 종류(역할)도 고른다 (Qwen-Agent Router처럼 "이름: 설명"을 보고).
+- 대화 차례는 짧은 프롬프트 + 역할 목록 (도구는 이름만). 일하는 걸음은 그 역할의 지시와 그 역할의 도구 설명만 보고,
+  출력 형식의 도구 이름도 그 역할 것만 (Manus "mask, don't remove": 고를 수 없는 도구는 형식에서 가린다)
+- 다른 역할의 도구가 필요하면 handoff 도구로 넘긴다 (OpenAI Agents SDK의 handoff, Roo Code의 switch_mode). 같은 대화를 이어 간다
+- 역할을 못 고르면(없는 이름, 형식 실패, 걸음 모양의 답) 예전처럼 모든 도구로
 
 중간 보고 (M8, 연구원님 결정: 모델 판단 + 도구 6번)
 - 범위를 크게 넓히기 전, 오래 걸릴 일 전, 유력한 곳에서 못 찾았을 때 모델이 찾은 것과 다음 길을 말하고 묻는다 (프롬프트)
@@ -43,12 +49,12 @@
 - 이번 작업의 기록(transcript)을 돌려준다. 다음 작업이 이것을 기억한다
 
 작은 모델을 위한 안전망 (원칙 4: 모델은 틀린다고 가정한다)
-- 근거 확인: 파일이나 최신 정보를 다루는 이야기인데 이번 작업에서 도구를 한 번도 부르지 않고 답하면서, 출처가
-  앞에서 확인한 자료에 없으면 한 번 되돌린다 (앞 대화에서 읽은 파일을 출처로 대면 그대로 받는다.
-  도구를 불렀다가 차단·거절된 뒤의 답은 그 사실을 말하는 것이라 되돌리지 않는다)
+- 답 점검 (M9.3, checker.py. 낱말 목록 안전망 guards.py와 출력 규칙 덧대기를 대신한다):
+  답마다 같은 대화 뒤에 질문 셋을 붙여 모델이 판단한다 (요청에 답했나, 근거가 있나, 결과가 말이 되나).
+  걸리면 그 답과 점검 결과를 이번 작업의 대화에 남기고 다시 답하게 한다 (smolagents final_answer_checks).
+  limits.check_answers번까지. 점검이 깨지면(형식·모델 오류) 답을 그대로 낸다. 되묻기와 중간 보고는 점검하지 않는다
 - 출처 주소 확인 (M3): 답의 출처에 도구 결과(검색 결과, 읽은 페이지)에 나온 적 없는 주소가 있으면 한 번 되돌린다
-  (작은 모델은 그럴듯한 논문 주소를 지어낸다)
-- 답 안전망(guards.py): 각각 한 번만 되돌린다 (영어 답에만)
+  (작은 모델은 그럴듯한 논문 주소를 지어낸다. 판단이 아니라 대조라 그대로 둔다)
 - 같은 결과 안내: 같은 도구가 같은 결과를 또 내면 "지금까지 확인한 것으로 답하라"고 덧붙인다
 - 멈출 때 보고: 같은 호출·최대 횟수·도구 오류로 멈추면, 도구 없이 지금까지 확인한 것만으로 한 번 답하게 한다
 
@@ -70,12 +76,14 @@ from typing import Any, Callable, Iterable, Protocol
 from glados.config import LoopLimits
 from glados.core import events as ev
 from glados.core.context import (
-    CHECK_MARK, STOP_MARK, TASK_RESERVE, Conversation, fit, grounded, local_texts, observation, size, unseen_urls,
+    CHECK_MARK, STOP_MARK, TASK_RESERVE, Conversation, fit, local_texts, observation, size, unseen_urls,
 )
 from glados.core.events import Event
-from glados.core.guards import Guard
+from glados.core.checker import Outcome as CheckOutcome
+from glados.core.checker import check_gate
 from glados.core.llm import Cancelled, FormatError
-from glados.core.prompts import PLANNING
+from glados.core import roles as role_kit
+from glados.core.prompts import PLANNING, ROLE_RULE, STAGE_RULE
 from glados.core.schema import Answer, Plan, Step, parse_plan, plan_schema, step_schema
 from glados.core.translate import Translator, in_language
 from glados.hands import ToolError, ToolRegistry
@@ -88,13 +96,6 @@ OBS_TAIL = 1500
 TRAIL_HEAD = 600   # 작업 메모에 남길 결과 앞부분
 MAX_PLAN = 8       # 화면에 보여 줄 계획 단계 수
 
-NUDGE_EVIDENCE = (
-    f"{CHECK_MARK} You used no tool in this task, and your sources are not in any earlier tool result. "
-    "If the answer is about files (whether they exist, how many, what they say), check with a tool first. "
-    "If you already found or read the file earlier in this conversation, put its path in sources. "
-    "If the question is not about files, give the same answer again."
-)
-NUDGE_WEB = " For current information from the web (news, prices, releases, recent papers), use web.search."
 NUDGE_SOURCES = (
     f"{CHECK_MARK} These sources are not in any tool result: {{urls}}. Cite only URLs that a tool returned, "
     "exactly as shown. If you have not found or read the page, search for it and read it first, "
@@ -114,16 +115,29 @@ HINT_REPEAT = "\n[note] Same result as before. Unless you change the conditions 
 # 상태를 바꾸거나 다시 볼 이유가 있는 도구(명령, 서버, 파일 고치기)는 빼고
 NO_REPEAT = {"fs.search", "fs.inspect", "fs.read", "web.search", "web.fetch", "papers.search", "session.resume"}
 NUDGE_PLANNED = (f"{CHECK_MARK} Plan noted. Goal: {{goal}} Carry it out one step at a time; if results show a better "
-                 "way, change the plan. Your final answer must answer this goal as the Researcher asked it, not a "
-                 "narrower question you made up; if you could do only part of it, say which part.")
+                 "way, change the plan.")
 NO_FACTS = "(none known)"
 HINT_DONE_BEFORE = ("[note] You already made this exact call at step {step} of this task; its result is above. "
                     "It was not run again. Change the words, kind, or roots, use another tool, or answer with what you have.")
 NUDGE_ENGLISH = (f"{CHECK_MARK} Write answer.fact in English. The answer is translated for the Researcher "
                  "automatically.")
+CHECKIN_ASK = " Shall I go on, and how?"   # 중간 보고가 질문 없이 끝나면 붙인다 (M8.5)
 CHECKIN = ("{mark} You have used {count} tools in this task. Do not call more tools now. Tell the Researcher what you "
            "checked and what you found so far, and ask in one short question whether to go on and how (for example a "
            "bigger place or another way).")
+# 막혔을 때 (M9.4, Magentic-One: 진행 장부가 max_stalls번 "나아가지 못함"이면 계획을 고쳐 다시)
+STUCK = ("{mark} The work is not moving forward ({count} steps in a row; last: {reason}). Take your turn again: "
+         "make a new plan from what you have learned (another place, another way, or another role), answer with "
+         "what you have, or ask the Researcher what to do.")
+CHECKIN_STUCK = ("{mark} The work is still not moving forward after a new plan. Do not call more tools now. Tell the "
+                 "Researcher what you checked and what you found so far, and ask in one short question how to go on.")
+# 단계 (M9.5)
+STAGE_NOT_DONE = "{mark} Stage {k}/{n} ({name}) is not done yet: {reason} Keep working on this stage."
+STAGE_APPROVAL = ("{mark} The {name} stage is ready: {said} Do not call tools now. Show it to the Researcher in plain "
+                  "words and ask in one short question whether to go on with it or what to change.")
+STAGE_ASK = "Shall I go on with this?"
+ALL_STAGES_DONE = ("{mark} All stages are done. Answer the Researcher: the verdict, the key numbers, and what the test "
+                   "does not show.")
 FINAL_REPORT = (
     "{mark} {why} Do not call more tools. Answer only with what you have confirmed so far, "
     "and say plainly what you could not confirm."
@@ -176,26 +190,33 @@ def run_task(
     audit: AuditFn | None = None,
     overflow_dir: Path | None = None,
     task_id: str = "",
-    evidence_check: Callable[[str], bool] | None = None,
-    answer_guards: Iterable[Guard] = (),
+    checker: Callable[[list[Message], str], CheckOutcome] | None = None,
     final_note: str = "",
     translator: Translator | None = None,
     reply_lang: str = "en",
     cancelled: Callable[[], bool] | None = None,
     plan_first: bool = True,
     situation: str = "",
+    roles: list[role_kit.Role] | None = None,
+    prompt_for: Callable[[list[str], str], str] | None = None,
+    stages: str = "auto",
+    lead: Any = None,
 ) -> TaskResult:
     """memory가 있으면 지난 대화를 길이에 맞게 넣는다 (없으면 history를 그대로).
     context_chars: 보낼 수 있는 전체 글자 수 (context.limit_chars). 없으면 줄이지 않는다.
-    evidence_check: 글(요청 + 모델의 생각과 답)이 파일을 다루는지. 그렇다면 근거를 확인한다.
-    answer_guards: 답을 받기 전 안전망 (guards.py). 각각 한 작업에서 한 번만 되돌린다.
+    checker: 답 점검 (M9.3, checker.py). (보낼 대화 + 답 초안, 요청) -> 통과 또는 고칠 점. limits.check_answers번까지 되돌린다.
     final_note: 시스템 메시지 맨 끝(도구 목록 뒤)에 붙일 지시 (언어 안내).
     translator, reply_lang: 모델의 영어 답을 연구원님의 언어로 옮겨 화면에 낸다 ("en"이면 옮기지 않음).
     cancelled: 연구원님이 멈췄는지 (TUI). 참이면 다음 걸음 전에 멈춘다.
     plan_first: 도구가 있으면 행동하기 전에 계획만 받는 호출을 먼저 한다 (M7.7).
-    situation: 계획할 때 볼 이 컴퓨터의 지금 사실 (영어 몇 줄)."""
+    situation: 계획할 때 볼 이 컴퓨터의 지금 사실 (영어 몇 줄).
+    roles, prompt_for: 역할 (M9.2). prompt_for(도구 이름들, 역할 지시) -> 그 역할의 시스템 프롬프트.
+    stages: 단계가 있는 역할 (M9.5). "auto"(동의가 필요한 단계만 기다림) | "pilot"(단계마다 기다림) | "off".
+    lead: 판단을 맡길 모델 (M9.6, Goose lead/worker). 대화 차례(처음과 막혀서 다시)·단계 확인, 그리고 걸음의 형식이
+      끝내 깨졌을 때 그 걸음을 한 번 더. 없으면 llm 하나로."""
     emit = emit or (lambda e: None)
     cancelled = cancelled or (lambda: False)
+    judge = lead or llm                # 판단하는 모델 (M9.6)
     approve = approve or (lambda call, d: "deny")
     audit = audit or (lambda call, d, who: None)
 
@@ -211,9 +232,12 @@ def run_task(
         hist = list(history)
     schema = step_schema(tools.specs())
     first = step_schema(tools.specs(), plan=True) if tools.names() else schema   # 첫 걸음: 어떻게 할지 먼저
+    active = tools                     # 지금 쓸 수 있는 도구 (역할을 고르면 그 역할 것만, M9.2)
+    role_now: role_kit.Role | None = None
+    stage_at = -1                      # 단계가 있는 역할의 지금 단계 (M9.5). -1이면 단계 없음
+    roles = [r for r in (roles or []) if prompt_for is not None]
     if ctx.texts is None:      # 웹으로 나갈 글 검사(정책)가 볼 글: 이 컴퓨터의 도구가 돌려준 글, 연구원님이 쓴 글
         ctx.texts = lambda: local_texts([*hist, *task])
-    nudge_evidence = NUDGE_EVIDENCE + (NUDGE_WEB if "web.search" in tools.names() else "")
     emit(Event(ev.START, {"request": request}))
 
     def outgoing(head: Message | None = None) -> list[Message]:
@@ -233,20 +257,19 @@ def run_task(
     errors: Counter[str] = Counter()
     trail: list[dict[str, Any]] = []
     last_obs: dict[str, str] = {}
-    nudged = False
     sources_nudged = False     # 출처 주소 확인은 한 번만
-    attempted = False          # 이번 작업에서 도구를 부르려 했는지 (차단·거절·오류도 포함)
     english_nudged = False     # 영어가 아닌 답은 한 번만 되돌린다 (M8.3)
     used = 0                   # 이번 작업에서 부른 도구 수 (중간 보고, M8)
-    guards = list(answer_guards)
-    fired: set[int] = set()    # 이미 되돌린 안전망
+    checks_left = limits.check_answers if checker is not None else 0   # 답 점검으로 되돌릴 수 있는 횟수 (M9.3)
+    check_head: Message | None = None   # 대화 차례가 바로 한 답은 그 차례의 시스템 메시지로 점검 (앞부분을 다시 계산하지 않게)
     planned_only = 0           # 계획만 쓰고 행동하지 않은 답 (한 번은 되돌려 준다)
     denied = 0                 # 정책에 막힌 횟수
 
-    def send_back(step_no: int, key: str, nudge: str) -> None:
-        """답을 받지 않고 한 번 되돌린다. 그 답은 화면에도 기억에도 남기지 않는다."""
+    def send_back(step_no: int, key: str, nudge: str, **params: Any) -> None:
+        """답을 받지 않고 한 번 되돌린다. 그 답은 화면에도 기억에도 남기지 않는다.
+        이번 작업의 대화에는 그 답과 안내를 남긴다 (smolagents: 걸린 답의 오류를 그 걸음의 기록에 두고 계속)."""
         transcript.pop()
-        emit(Event(ev.GUARD, {"step": step_no, "key": key, "message": t(key, "en")}))
+        emit(Event(ev.GUARD, {"step": step_no, "key": key, "message": t(key, "en", **params), "params": params}))
         task.append({"role": "user", "content": nudge})
 
     def spoken(text: str) -> tuple[str, bool, bool]:
@@ -284,63 +307,131 @@ def run_task(
                              "answered": said is not None, "params": params}))
         return TaskResult("stopped", shown, sources, steps, reason, message, trail, transcript, internal=said)
 
-    def show_plan(made: Plan) -> None:
-        """대화 차례의 첫 말(say, 연구원님의 언어)과 계획(영어: 맥락 패널). M8: 계획은 옮기지 않는다."""
+    def activate(role: role_kit.Role, at: int = -1) -> None:
+        """그 역할로 일한다: 그 역할의 지시와 도구 설명, 형식의 도구 이름도 그 역할 것만 (M9.2).
+        at: 단계가 있는 역할이면 그 단계 (M9.5): 그 단계의 도구만, 지시 끝에 단계 목록과 지금 단계."""
+        nonlocal active, role_now, schema, system, stage_at
+        assert prompt_for is not None
+        role_now = role
+        staged = bool(role.stages) and stages != "off" and at >= 0
+        stage_at = min(at, len(role.stages) - 1) if staged else -1
+        stage = role.stages[stage_at] if staged else None
+        active = role_kit.subset(role, tools, roles, stage)
+        text = role.instructions + ("\n\n" + role_kit.stage_text(role, stage_at) if staged else "")
+        parts = [prompt_for([n for n in active.names() if n != role_kit.HANDOFF], text).rstrip(),
+                 active.describe()] + ([final_note] if final_note else [])
+        system = {"role": "system", "content": "\n\n".join(parts)}
+        schema = step_schema(active.specs(), staged=staged)
+
+    def enter(role: role_kit.Role, start: str = "") -> None:
+        """역할로 들어간다. 단계가 있으면 고른 단계, 아니면 대화에 남은 단계 표시에서 이어 간다 (M9.5)."""
+        if not role.stages or stages == "off":
+            activate(role)
+            return
+        at = role.stage_index(start)
+        if at < 0:
+            at = role_kit.resume_at(role, [*hist, *task])
+        activate(role, at)
+        record({"role": "user", "content": role_kit.marker(role, at, "now")})
+        emit(Event(ev.STAGE, {"role": role.name, "stage": role.stages[at].name, "index": at + 1,
+                              "total": len(role.stages), "status": "now"}))
+
+    def show_plan(made: Plan, at: int = 0) -> None:
+        """대화 차례의 첫 말(say, 연구원님의 언어)과 계획(영어: 맥락 패널). M8: 계획은 옮기지 않는다.
+        at: 몇 번째 걸음 뒤의 차례인지 (처음은 0, 막혀서 다시 계획하면 그 걸음)."""
         steps = [p.strip() for p in made.plan if p.strip()][:MAX_PLAN]
         say, translated, failed = spoken(made.say.strip())
         emit(Event(ev.PLAN, {
-            "step": 0, "say": say, "goal": made.goal.strip(), "plan": steps, "check": made.check.strip(),
+            "step": at, "say": say, "goal": made.goal.strip(), "plan": steps, "check": made.check.strip(),
+            "role": role_now.name if role_now is not None else "",
             "lang": reply_lang, "translated": translated, "untranslated": failed,
             "original": {"say": made.say.strip()},
         }))
 
-    def checkin(steps: int, count: int) -> TaskResult:
-        """중간 보고 (M8): 도구 없이 지금까지 찾은 것을 말하고 계속할지 묻는다. 못 받으면 멈춤으로."""
-        note = CHECKIN.format(mark=CHECK_MARK, count=count)
+    def checkin(steps: int, count: int, stuck: bool = False, note: str = "", reason: str = "checkin",
+                fallback: str = "") -> TaskResult:
+        """중간 보고 (M8): 도구 없이 지금까지 찾은 것을 말하고 계속할지 묻는다. 못 받으면 멈춤으로.
+        stuck: 다시 계획해도 나아가지 못해서 (M9.4). note·reason: 단계 동의 묻기 (M9.5)."""
+        note = note or (CHECKIN_STUCK if stuck else CHECKIN).format(mark=CHECK_MARK, count=count)
         msgs = outgoing() + [{"role": "user", "content": note}]
         try:
             got, raw = llm.chat_json(msgs, step_schema([]), Step.model_validate, retries=1)
         except FormatError:
-            return stop("max_steps", steps, report=True, limit=steps)
+            if not fallback:
+                return stop("max_steps", steps, report=True, limit=steps)
+            got = Step(thought="", done=True, answer=Answer(fact=fallback))
+            raw = got.model_dump_json(exclude={"plan", "action"})
         assert got.answer is not None
+        if not asks(got.answer.fact):                    # 중간 보고는 늘 질문으로 끝난다 (M8.5)
+            got = got.model_copy(update={"answer": Answer(fact=got.answer.fact.rstrip() + CHECKIN_ASK,
+                                                          wit=got.answer.wit)})
+            raw = got.model_dump_json(exclude={"plan", "action"})
         record({"role": "assistant", "content": raw})
         shown = deliver(got.answer, list(got.sources))
-        return TaskResult("done", shown, list(got.sources), steps, reason="checkin", trail=trail,
+        return TaskResult("done", shown, list(got.sources), steps, reason=reason, trail=trail,
                           transcript=transcript, internal=got.answer)
 
     pending: tuple[Step, str] | None = None     # 계획 호출이 받은 첫 걸음 (계획 없이 바로 답했거나 걸음 모양의 답)
     current = 0                # 지금 걸음 (멈춤 보고용)
+    stalls = 0                 # 나아가지 못한 걸음 (M9.4, Magentic-One n_stalls)
+    replans = limits.replans   # 막혔을 때 다시 계획할 수 있는 횟수
+
+    def converse(steps: int) -> TaskResult | None:
+        """대화 차례 (M7.7 -> M8 -> M9.4): 묻기, 바로 답하기, 또는 (역할을 골라) 계획하고 일하기.
+        처음에 한 번, 그리고 일이 막혔을 때 다시 (Magentic-One 바깥 고리: 막히면 계획을 고쳐 다시).
+        묻고 끝나면 그 결과를, 아니면 None (pending·check_head·first를 정해 둔다)."""
+        nonlocal pending, check_head, first
+        facts = situation.strip() or NO_FACTS
+        if roles:                                       # 짧은 프롬프트 + 역할 목록 (도구는 이름만, M9.2)
+            assert prompt_for is not None
+            staged_names = [s.name for r in roles for s in r.stages] if stages != "off" else []
+            ahead = [prompt_for([], "").rstrip(), role_kit.menu(roles, tools),
+                     PLANNING.format(facts=facts, role_rule=ROLE_RULE + (STAGE_RULE if staged_names else ""))]
+        else:
+            ahead = [system_prompt.rstrip(), tools.describe(), PLANNING.format(facts=facts, role_rule="")]
+        planner: Message = {"role": "system", "content": "\n\n".join(ahead + ([final_note] if final_note else []))}
+        wanted = (plan_schema([r.name for r in roles], [s.name for r in roles for s in r.stages] if stages != "off"
+                              else None) if roles else plan_schema())
+        try:
+            made, raw = judge.chat_json(outgoing(planner), wanted, parse_plan, retries=limits.format_retries)
+        except FormatError:
+            return None                                 # 계획 없이 예전처럼 (첫 걸음에 계획)
+        if isinstance(made, Step):
+            pending = (made, raw)
+        elif isinstance(made, Plan) and (made.next == "ask" or (made.next == "act" and asks(made.say))):
+            said = tidy(made.answer())                           # 묻고 끝, 답을 기다린다 (M7.8, M8.2)
+            asked = Step(thought=made.goal, done=True, answer=said)
+            record({"role": "assistant", "content": asked.model_dump_json(exclude={"plan", "action"})})
+            shown = deliver(said, [])
+            return TaskResult("done", shown, [], steps, reason="ask", trail=trail, transcript=transcript,
+                              internal=said)
+        elif isinstance(made, Plan) and made.next == "answer":
+            direct = Step(thought=made.goal, done=True, answer=tidy(made.answer()), sources=list(made.sources))
+            pending = (direct, direct.model_dump_json(exclude={"plan", "action"}))
+            check_head = planner
+        elif isinstance(made, Plan):
+            chosen = role_kit.find(roles, made.role) if roles else None
+            task.append({"role": "assistant", "content": raw})
+            if chosen is not None:
+                enter(chosen, made.stage)               # 그 역할의 지시와 도구로 (없는 이름이면 그대로)
+            show_plan(made, steps)
+            goal = made.goal.strip() or "(see the plan)"
+            task.append({"role": "user", "content": NUDGE_PLANNED.format(goal=goal.rstrip(".") + ".")})
+            first = schema                              # 계획은 이미 있다: 걸음마다 바꿀 때만 쓴다
+        return None
+
     try:
         if plan_first and tools.names():
             if cancelled():
                 return stop("user", 0)
-            facts = situation.strip() or NO_FACTS
-            ahead = [system_prompt.rstrip(), tools.describe(), PLANNING.format(facts=facts)]   # 언어 안내는 늘 맨 끝
-            planner: Message = {"role": "system", "content": "\n\n".join(ahead + ([final_note] if final_note else []))}
-            try:
-                made, raw = llm.chat_json(outgoing(planner), plan_schema(), parse_plan, retries=limits.format_retries)
-            except FormatError:
-                made, raw = None, ""                    # 계획 없이 예전처럼 (첫 걸음에 계획)
-            if isinstance(made, Step):
-                pending = (made, raw)
-            elif isinstance(made, Plan) and (made.next == "ask" or (made.next == "act" and asks(made.say))):
-                said = tidy(made.answer())                       # 묻고 끝, 답을 기다린다 (M7.8, M8.2)
-                asked = Step(thought=made.goal, done=True, answer=said)
-                record({"role": "assistant", "content": asked.model_dump_json(exclude={"plan", "action"})})
-                shown = deliver(said, [])
-                return TaskResult("done", shown, [], 0, reason="ask", trail=trail, transcript=transcript,
-                                  internal=said)
-            elif isinstance(made, Plan) and made.next == "answer":
-                direct = Step(thought=made.goal, done=True, answer=tidy(made.answer()), sources=list(made.sources))
-                pending = (direct, direct.model_dump_json(exclude={"plan", "action"}))
-            elif isinstance(made, Plan):
-                show_plan(made)
-                task.append({"role": "assistant", "content": raw})
-                goal = made.goal.strip() or "(see the plan)"
-                task.append({"role": "user", "content": NUDGE_PLANNED.format(goal=goal.rstrip(".") + ".")})
-                first = schema                          # 계획은 이미 있다: 걸음마다 바꿀 때만 쓴다
+            asked_back = converse(0)
+            if asked_back is not None:
+                return asked_back
 
-        for step_no in range(1, limits.max_steps + 1):
+        limit = limits.max_steps          # 단계가 있으면 단계마다 새로 (M9.5: 7단계 실험이 한 작업의 12걸음에 걸리지 않게)
+        step_no = 0
+        while step_no < limit:
+            step_no += 1
             current = step_no
             if cancelled():
                 return stop("user", step_no - 1)
@@ -349,17 +440,84 @@ def run_task(
             if pending is not None:
                 (step, raw), pending = pending, None
             else:
+                wanted = first if step_no == 1 else schema
                 try:
-                    step, raw = llm.chat_json(outgoing(), first if step_no == 1 else schema, Step.model_validate,
-                                              retries=limits.format_retries)
+                    step, raw = llm.chat_json(outgoing(), wanted, Step.model_validate, retries=limits.format_retries)
                 except FormatError as e:
-                    return stop("format", step_no, str(e))
+                    if lead is None:
+                        return stop("format", step_no, str(e))
+                    try:                                         # 일하는 모델이 형식을 못 맞추면 판단 모델이 그 걸음을
+                        step, raw = lead.chat_json(outgoing(), wanted, Step.model_validate, retries=1)
+                    except FormatError as e2:
+                        return stop("format", step_no, str(e2))
             record({"role": "assistant", "content": raw})
             plan = [p.strip() for p in step.plan if p.strip()][:MAX_PLAN]
             if plan:
                 emit(Event(ev.PLAN, {"step": step_no, "plan": plan}))
             if step.thought:
                 emit(Event(ev.THOUGHT, {"step": step_no, "thought": step.thought}))
+            if step.progress is not None and not step.done and step_no > 1:    # 나아가고 있나 (M9.4)
+                if step.progress.answer:
+                    stalls = max(0, stalls - 1)
+                else:
+                    stalls += 1
+                    emit(Event(ev.STALL, {"step": step_no, "stalls": stalls, "reason": step.progress.reason}))
+                if stalls >= limits.max_stalls > 0:
+                    task.pop()                                         # 이 걸음은 하지 않고
+                    transcript.pop()
+                    stalls = 0
+                    if replans > 0 and plan_first:                     # 다시 계획 (막힌 이유를 보고)
+                        replans -= 1
+                        task.append({"role": "user", "content": STUCK.format(
+                            mark=CHECK_MARK, count=limits.max_stalls, reason=step.progress.reason.strip() or "-")})
+                        asked_back = converse(step_no - 1)
+                        if asked_back is not None:
+                            return asked_back
+                        continue
+                    return checkin(step_no - 1, used, stuck=True)      # 그래도 막히면 돌아와 묻는다
+            if stage_at >= 0 and role_now is not None and step.stage_done is not None and step.stage_done.answer:
+                role, at = role_now, stage_at                          # 단계를 끝냈다고 함: 조건 확인 (M9.5)
+                st, n, said = role.stages[at], len(role.stages), step.stage_done.reason.strip()
+                gate = check_gate(judge, outgoing(), at + 1, n, st.name, st.gate, said, st.approve or stages == "pilot")
+                info = {"role": role.name, "stage": st.name, "index": at + 1, "total": n, "reason": gate.reason}
+                if not gate.met:
+                    emit(Event(ev.STAGE, {**info, "status": "not_done"}))
+                    task.pop()                                         # 이 걸음은 하지 않고 그 단계를 이어 간다
+                    transcript.pop()
+                    task.append({"role": "user", "content": STAGE_NOT_DONE.format(
+                        mark=CHECK_MARK, k=at + 1, n=n, name=st.name, reason=gate.reason or "-")})
+                    continue
+                if not gate.approved:                                  # 연구원님 동의를 받고 넘어간다
+                    task.pop()
+                    transcript.pop()
+                    record({"role": "user", "content": role_kit.marker(role, at, "waiting", said)})
+                    emit(Event(ev.STAGE, {**info, "status": "waiting"}))
+                    return checkin(step_no - 1, used, reason="ask", fallback=f"{said} {STAGE_ASK}".strip(),
+                                   note=STAGE_APPROVAL.format(mark=CHECK_MARK, name=st.name, said=said or "-"))
+                last = at == n - 1
+                limit = step_no + limits.max_steps                     # 다음 단계는 걸음 한도를 새로 (단계의 문이 확인점)
+                used = 0                                               # 중간 보고의 도구 수도 단계마다
+                notes = [role_kit.marker(role, at, "complete" if last else "passed", said)]
+                emit(Event(ev.STAGE, {**info, "status": "complete" if last else "passed"}))
+                if last:
+                    activate(role)                                     # 단계는 끝, 그 역할로 답한다
+                else:
+                    activate(role, at + 1)
+                    notes.append(role_kit.marker(role, at + 1, "now"))
+                    emit(Event(ev.STAGE, {"role": role.name, "stage": role.stages[at + 1].name, "index": at + 2,
+                                          "total": n, "status": "now"}))
+                if step.done:                                          # 끝내며 답했다: 표시는 답 앞에, 답은 그대로
+                    for m in notes:
+                        task.insert(len(task) - 1, {"role": "user", "content": m})
+                        transcript.insert(len(transcript) - 1, {"role": "user", "content": m})
+                else:
+                    task.pop()
+                    transcript.pop()
+                    for m in notes:
+                        record({"role": "user", "content": m})
+                    if last:
+                        task.append({"role": "user", "content": ALL_STAGES_DONE.format(mark=CHECK_MARK)})
+                    continue
 
             if not step.done and step.action is None:              # 계획만 쓰고 행동은 안 함
                 planned_only += 1
@@ -370,19 +528,9 @@ def run_task(
                 task.append({"role": "user", "content": NUDGE_ACT})
                 continue
 
+            head, check_head = check_head, None
             if step.done:
                 assert step.answer is not None
-                said = f"{step.answer.fact} {step.answer.wit}"
-                needs_check = (
-                    not attempted and not nudged and tools.names()
-                    and evidence_check is not None
-                    and evidence_check(f"{request}\n{step.thought}\n{said}")
-                    and not grounded(list(step.sources), [*hist, *task])
-                )
-                if needs_check:
-                    nudged = True
-                    send_back(step_no, "guard.evidence", nudge_evidence)
-                    continue
                 unseen = [] if sources_nudged else unseen_urls(list(step.sources), [*hist, *task])
                 if unseen:
                     sources_nudged = True
@@ -392,17 +540,15 @@ def run_task(
                     english_nudged = True                              # 전부 영어로 (M8.3)
                     send_back(step_no, "guard.english", NUDGE_ENGLISH)
                     continue
-                found = None
-                if in_language(step.answer.fact, "en"):                # 안전망 낱말 목록은 영어
-                    for i, guard in enumerate(guards):
-                        if i not in fired:
-                            found = guard(said, bool(tools.names()))
-                            if found is not None:
-                                fired.add(i)
-                                break
-                if found is not None:
-                    send_back(step_no, *found)
-                    continue
+                if checks_left > 0 and checker is not None and not cancelled():
+                    verdict = checker(outgoing(head), request)          # 답 점검 (M9.3): 이 대화 그대로 뒤에 질문
+                    emit(Event(ev.CHECK, {"step": step_no, "passed": verdict.passed, "failed": verdict.failed,
+                                          "error": verdict.error}))
+                    if not verdict.passed:
+                        checks_left -= 1
+                        send_back(step_no, "guard.check", verdict.feedback,
+                                  what=", ".join(t(f"check.{k}") for k, _ in verdict.failed))
+                        continue
                 kept = tidy(step.answer)
                 if kept is not step.answer:                      # 영어가 아닌 위트: 기억에서도 뺀다 (M8.2)
                     step = step.model_copy(update={"answer": kept})
@@ -413,10 +559,26 @@ def run_task(
                                   internal=kept)
 
             assert step.action is not None
-            attempted = True
-            used += 1
             call = ToolCall(step.action.tool, dict(step.action.args))
+            if call.tool == role_kit.HANDOFF and roles:       # 다른 역할로 넘기기 (도구 수에 세지 않는다)
+                target = role_kit.find(roles, str(call.args.get("role", "")))
+                if target is None or target is role_now:
+                    note = f"Error: no other role named {call.args.get('role')!r}. Roles: {', '.join(r.name for r in roles)}."
+                else:
+                    enter(target)
+                    emit(Event(ev.ROLE, {"step": step_no, "role": target.name, "reason": str(call.args.get("reason", ""))}))
+                    note = (f"Now working as {target.name}. Tools: "
+                            f"{', '.join(n for n in active.names() if n != role_kit.HANDOFF)}.")
+                record(observation(role_kit.HANDOFF, note))
+                continue
+            used += 1
             emit(Event(ev.PROPOSAL, {"step": step_no, "tool": call.tool, "args": call.args}))
+            if active is not tools and active.get(call.tool) is None:   # 이 역할에 없는 도구 (형식이 막지만 한 번 더)
+                result = (f"Error: {call.tool} is not one of this role's tools. Use handoff to move to a role that has "
+                          "it, or answer with what you have.")
+                emit(Event(ev.OBSERVATION, {"tool": call.tool, "text": result}))
+                record(observation(call.tool, result))
+                continue
 
             key = json.dumps([call.tool, call.args], sort_keys=True, ensure_ascii=False, default=str)
             same = same + 1 if key == last_key else 1
@@ -430,13 +592,13 @@ def run_task(
                 continue
 
             timeout = limits.remote_timeout_s if call.tool.startswith("remote.") else limits.local_timeout_s
-            tool = tools.get(call.tool)
+            tool = active.get(call.tool)
             if tool is not None and tool.timeout_s > timeout:
                 timeout = tool.timeout_s                         # 오래 걸리는 도구 (fs.inspect: 파일마다 모델에게 물음)
             decision = policy.check(call, ctx)
             if decision.verdict == "ask" and tool is not None and tool.preview is not None:
                 try:                                             # 승인 카드 (remote.run: GPU·커밋·규칙). 읽기만
-                    call = replace(call, card=tools.preview(call, timeout_s=timeout, cancelled=cancelled))
+                    call = replace(call, card=active.preview(call, timeout_s=timeout, cancelled=cancelled))
                 except ToolError as e:                           # 시작할 수 없는 일은 묻지 않고 오류로 돌려준다
                     errors[call.tool] += 1
                     result = f"Error: {e}"
@@ -465,7 +627,7 @@ def run_task(
                         return stop("denied", step_no, report=True, count=denied)
             else:
                 try:
-                    result = _clip(tools.run(call, timeout_s=timeout, cancelled=cancelled), overflow_dir, task_id, step_no)
+                    result = _clip(active.run(call, timeout_s=timeout, cancelled=cancelled), overflow_dir, task_id, step_no)
                 except ToolError as e:
                     errors[call.tool] += 1
                     result = f"Error: {e}"
@@ -485,7 +647,7 @@ def run_task(
             emit(Event(ev.OBSERVATION, {"tool": call.tool, "text": shown_text[:500]}))
             record(observation(call.tool, shown_text))
 
-        return stop("max_steps", limits.max_steps, report=True, limit=limits.max_steps)
+        return stop("max_steps", step_no, report=True, limit=limits.max_steps)
     except Cancelled:          # 모델 호출·도구·번역 중에 연구원님이 멈춤
         return stop("user", current)
 

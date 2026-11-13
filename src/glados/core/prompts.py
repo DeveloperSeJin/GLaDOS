@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from importlib import resources
 
+from glados.core.checker import RUBRIC
 from glados.core.translate import LANGUAGES
 
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -32,6 +33,9 @@ Output rules:
 - Reply with exactly one JSON object and nothing else.
 - plan: you made a plan before acting; follow it one step at a time. Write plan again only if what you learned \
 changes it.
+- progress: is the work moving toward the goal? answer false if the last result repeated an earlier one, found \
+nothing new, or showed a barrier (no access, the wrong place, a tool that cannot do it); reason in a few words. \
+true for the first step.
 - thought: one or two sentences of reasoning for this step.
 - action: the tool call for this step: its name (tool) and arguments (args), with done set to false. \
 When you answer instead, set action to null and done to true.
@@ -48,12 +52,7 @@ planned, the next step would take long (for example looking at many photos), or 
 keep trying small variations.
 - Answer greetings and general questions directly, without tools.
 - If these instructions already say it (time, servers, notes), answer without tools.
-- Say only what tool results, the Researcher's words, or general knowledge support. Never claim what the system, a \
-file, or data can do unless a result shows it.
-- Answer what the Researcher asked, at the scope they asked. Never swap it for a narrower question of your own; \
-if you could do only part of it, say which part.
-- When the Researcher asks to see something (a table, a list, numbers), put it in answer.fact itself (a Markdown \
-table is fine), even if you also save it to a file.
+- {rubric}
 - sources: the file paths or URLs you relied on, or an empty list.
 - Remember the earlier conversation and continue from it. "It", "the file I found", and "that one" refer to it.
 - "[result: ...]" messages are tool results. "[work notes]" lists the tools an earlier task used and what they returned.
@@ -67,9 +66,10 @@ Reply with one JSON object:
 did not give (a year, a measure, a place, a narrower topic). If you cannot tell what they want, write what is unclear.
 - next: "answer" for a greeting, small talk, or a question you can answer from these instructions or general \
 knowledge. "ask" if you cannot tell what the Researcher wants (the request could mean quite different things and the \
-conversation does not settle it); do not guess. "act" if it needs tools. If say asks the Researcher anything, next \
+conversation does not settle it), or if it needs a detail you do not have and the notes and conversation do not \
+give it (a place for the weather, which file, whose schedule); do not guess. "act" if it needs tools. If say asks the Researcher anything, next \
 is "ask": wait for the answer before acting.
-- plan (English, for "act"; otherwise empty): 2 to 6 short steps. In each: what to look for or do, where (think of every place it could be, using the \
+{role_rule}- plan (English, for "act"; otherwise empty): 2 to 6 short steps. In each: what to look for or do, where (think of every place it could be, using the \
 facts below; never narrow to a place the Researcher did not name), and which tool. Put the most likely way first, \
 then what to try if it finds nothing.
 - check (English, for "act"; otherwise empty): how you will know the result answers the goal, and when to stop.
@@ -80,6 +80,14 @@ question offering two or three likely meanings; for "act", one or two sentences 
 - sources: for "answer", what you relied on; otherwise [].
 Facts about this computer now:
 {facts}"""
+
+# 단계가 있는 역할이 있을 때 (M9.5)
+STAGE_RULE = ("- stage (optional, for a role with stages): where to start: its first stage for new work, or the stage "
+              "named in the last [stage] note to continue that work.\n")
+
+# 역할을 고를 때만 PLANNING에 들어간다 (M9.2)
+ROLE_RULE = ("- role (for \"act\"; otherwise the closest one): the role from the list above whose description fits the "
+             "goal. You will work with that role's tools; it can hand over to another role if a later step needs one.\n")
 
 EXAMPLES = """\
 Examples:
@@ -130,7 +138,9 @@ Experiments:
 random seed and the settings at the top, results printed at the end. Then run that file with shell.run. Put the \
 script path in sources, so the same numbers can be produced again.
 - When asked to summarize, tabulate, or write up earlier work, use the results already in this conversation; do not \
-run it again. If it must run again, say why, and use the same script and seed so the numbers stay the same."""
+run it again. If it must run again, say why, and use the same script and seed so the numbers stay the same.
+- When you report a statistical test, name the test and what it assumes, and say what the result shows and what it \
+does not show."""
 
 SHELL_RULES = """\
 Commands (shell.run):
@@ -193,10 +203,13 @@ def build_system_prompt(
     notes: str = "",
     earlier: str = "",
     experiments: str = "",
+    role_text: str | None = None,
 ) -> str:
     """작업마다 새로 만든다 (지금 시각, 작업 폴더가 맞도록). 언어 안내는 reply_note()로 따로 (맨 끝에 붙임).
     notes: MEMORY.md의 메모 (연구원님이 승인한 것만, M6). earlier: 기억이 비었을 때 최근 지난 대화 몇 개 (M6.1).
-    experiments: 이 컴퓨터에서 하는 실험의 스크립트를 둘 폴더 (M8.3: 작업 공간/experiments)."""
+    experiments: 이 컴퓨터에서 하는 실험의 스크립트를 둘 폴더 (M8.3: 작업 공간/experiments).
+    role_text: 역할로 일할 때 그 역할의 지시 (M9.2, agents/<역할>.md 본문). None이면 역할 없이 예전처럼
+    (실험 규칙도 여기에). 역할이 있으면 실험 규칙은 experiment 역할의 지시에 있다."""
     now = now or datetime.now()
     when = f"{now:%Y-%m-%d} ({WEEKDAYS[now.weekday()]}) {now:%H:%M}"
     env = f"Now: {when}. This computer: {os_label}. Model: {model_name}."
@@ -204,22 +217,29 @@ def build_system_prompt(
         env += f" Shell: {shell}."
     if cwd:
         env += f" Working folder (relative paths and commands start here): {cwd}."
-    layers = [persona(), ROLE, CONTRACT + ("\n" + RESUME_RULE if "session.resume" in tool_names else "")]
+    layers = [persona(), ROLE, CONTRACT.replace("{rubric}", RUBRIC) + ("\n" + RESUME_RULE if "session.resume" in tool_names else "")]
     if any(n.startswith("fs.") for n in tool_names):
         layers.append(FILE_RULES.replace("{example}", EXAMPLE_HEAD))
     if "shell.run" in tool_names:
         layers.append(SHELL_RULES.format(shell=shell or "the default shell"))
-        layers.append(EXPERIMENT_RULES.replace("{folder}", experiments or "the working folder"))
+        if role_text is None:
+            layers.append(EXPERIMENT_RULES.replace("{folder}", experiments or "the working folder"))
     if any(n.startswith("web.") for n in tool_names):
         layers.append(WEB_RULES.replace("{example}", EXAMPLE_HEAD))
     if any(n.startswith("remote.") for n in tool_names):
         layers.append(REMOTE_RULES.format(servers="; ".join(servers) or "(none)"))
         if runs:
             env += f" {runs}"
+    elif servers:                                  # 서버는 있는데 이 역할은 서버 도구가 없다 (대화 차례 등)
+        env += f" GPU servers: {'; '.join(servers)}."
+        if runs:
+            env += f" {runs}"
     else:
         env += " No GPU servers are set up yet (servers.toml)."
     if earlier and "session.resume" in tool_names:
         env += f" {earlier}"
+    if role_text:
+        layers.append(role_text.strip())
     layers.append(EXAMPLES)
     if notes:
         layers.append(NOTES_HEAD + "\n" + notes)

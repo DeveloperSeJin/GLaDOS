@@ -16,6 +16,10 @@ OBSERVATION = "observation"  # 도구 결과 요약 {tool, text}
 ANSWER = "answer"          # 최종 답 {fact, wit, sources}
 STOP = "stop"              # 끝나지 못하고 멈춤 {reason, message, detail, answered}
 GUARD = "guard"            # 안전망이 모델을 되돌림 {step, message}
+STAGE = "stage"            # 단계 (M9.5) {role, stage, index, total, status: now|passed|complete|waiting|not_done, reason}
+STALL = "stall"            # 나아가지 못한 걸음 (M9.4) {step, stalls, reason}
+CHECK = "check"            # 답 점검 (M9.3) {step, passed, failed: [(기준, 이유)], error}
+ROLE = "role"              # 다른 역할로 넘김 (M9.2) {step, role, reason}
 EGRESS = "egress"          # 이 컴퓨터 밖으로 보냄 (M3 웹 손) {tool, host, what, via, sent, searches}
                            #   sent·searches: 이 세션의 외부 전송·웹 검색 합계 (보낸 직후)
 

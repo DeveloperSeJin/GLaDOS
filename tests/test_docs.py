@@ -340,7 +340,7 @@ def test_model_plans_then_inspects_through_the_loop(lab):
                       limits=LoopLimits(), system_prompt="test", emit=events.append)
     assert result.status == "done"
     assert llm.calls[0][1]["required"][:3] == ["goal", "next", "plan"]   # 움직이기 전에 계획 (M7.7)
-    assert llm.calls[1][1]["required"] == ["thought", "action", "done"]
+    assert llm.calls[1][1]["required"] == ["progress", "thought", "action", "done"]
     assert [e.data["plan"] for e in events if e.kind == ev.PLAN] == [plan]
     observation = next(m["content"] for m in llm.calls[1][0] if m["content"].startswith("[result: fs.inspect]"))
     assert "2 of 5 inspected files answered yes" in observation and "Not read: 1 pdf with no text" in observation

@@ -1,7 +1,7 @@
 """영어로 통일한 루프의 안전망과 번역 시험 (실제 qwen3.5:4b 기록에서).
 
 - 모델은 영어로 생각하고 답한다. 영어가 아니면 한 번 되돌린다
-- 하겠다고만 하고 끝낸 답은 한 번 되돌린다 (영어 글 기준)
+- 하겠다고만 하고 끝낸 답은 M9.3부터 답 점검이 본다 (test_loop)
 - 답은 연구원님이 쓴 언어로 번역해 화면에 낸다. 기억에는 영어 답이 남는다
 """
 
@@ -15,7 +15,6 @@ from glados import cli
 from glados.config import LoopLimits, ensure_home, load_config
 from glados.core import events as ev
 from glados.core.context import Conversation
-from glados.core.guards import DEFAULT_GUARDS, NUDGE_PROMISE, about_files, promise_guard
 from glados.core.loop import NUDGE_ENGLISH, run_task
 from glados.core.translate import Translator
 from glados.hands import Tool, ToolRegistry
@@ -27,17 +26,8 @@ def translation(fact: str, wit: str = "") -> dict:
     return {"fact": fact, "wit": wit}
 
 
-def test_promise_guard_on_english_text():
-    assert promise_guard("No files found. I'll try a broader search.", True) == ("guard.promise", NUDGE_PROMISE)
-    assert promise_guard("Let me check the other folder.", True) is not None
-    assert promise_guard("I will relax the conditions and search again.", True) is not None
-    assert promise_guard("There is one PDF in Downloads: 학위논문.pdf.", True) is None
-    assert promise_guard("I'll try again.", False) is None                    # 도구가 없으면 할 수 있는 게 없다
 
 
-def test_about_files():
-    assert about_files("다운로드에서 찾아줘\nSearch the Downloads folder for the thesis.")
-    assert not about_files("안녕\nGreet the Researcher.\nHello, Researcher.")
 
 
 # ---------------------------------------------------------------- 루프와 함께
@@ -47,7 +37,7 @@ def run(llm, request, tools=None, reply_lang="en", memory=None):
     result = run_task(
         request, llm=llm, policy=Policy(base_layers()),
         ctx=make_ctx("linux", registered_tools=frozenset(tools.names())), tools=tools,
-        limits=LoopLimits(), system_prompt="test", emit=events.append, answer_guards=DEFAULT_GUARDS,
+        limits=LoopLimits(), system_prompt="test", emit=events.append,
         translator=Translator(llm), reply_lang=reply_lang, memory=memory,
     )
     return result, events
@@ -64,16 +54,6 @@ def test_non_english_answer_is_sent_back_once():
     assert not any("다운로드에 논문이 없습니다" in m["content"] for m in result.transcript)   # 되돌린 답은 기억 안 함
 
 
-def test_promise_then_action():
-    tools = ToolRegistry([Tool("fs.search", "find", run=lambda a: "1 found\n- /d/학위논문.pdf · 1KB · 2026-10-02 · en: thesis")])
-    llm = FakeLLM([
-        act("fs.search", query="paper"),
-        answer("Nothing yet. I'll try a broader search."),                          # 하겠다고만 함 -> 되돌림
-        act("fs.search", query="thesis"),
-        answer("Downloads has one thesis: 학위논문.pdf.", "", ["/d/학위논문.pdf"]),
-    ])
-    result, events = run(llm, "Find the paper", tools)
-    assert result.answer.fact.startswith("Downloads has") and [e.data["key"] for e in events if e.kind == ev.GUARD] == ["guard.promise"]
 
 
 def test_answer_in_another_language_is_translated_as_a_fallback():
@@ -209,11 +189,6 @@ def test_english_request_answered_in_korean_is_sent_back():
     assert result.answer.fact == "Hello, Researcher." and len(llm.calls) == 2
 
 
-def test_needs_evidence_covers_information_that_changes():
-    from glados.core.guards import needs_evidence
 
-    for text in ("What is the latest version of Python?", "Any news about Qwen today?", "recent papers on RAG",
-                 "the price of an RTX 5090", "Summarize https://example.com/post", "find my contract"):
-        assert needs_evidence(text), text
-    for text in ("Hello there.", "Explain what a p value is.", "How did hypothesis B do?"):
-        assert not needs_evidence(text), text
+
+
